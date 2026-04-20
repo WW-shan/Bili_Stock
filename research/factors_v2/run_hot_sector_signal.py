@@ -425,7 +425,7 @@ def send_dingtalk(result: dict) -> bool:
         resp = requests.post(url, json=payload, timeout=10)
         body = resp.json()
         if body.get("errcode") == 0:
-            print("  钉钉推送成功 ✓")
+            print("  钉钉推送成功 OK")
             return True
         else:
             print(f"  钉钉推送失败: {body}")
