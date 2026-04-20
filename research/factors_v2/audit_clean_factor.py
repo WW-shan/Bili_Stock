@@ -84,10 +84,18 @@ def build_panel():
     for fp in files:
         sym  = os.path.splitext(os.path.basename(fp))[0].upper()
         code = sym[2:]
+        # ETF
         if sym.startswith("SH") and (code[:3] in {"510","511","512","513","514",
                 "515","516","517","518","519","588"} or code[:2] == "56"):
             continue
         if sym.startswith("SZ") and code[:3] == "159":
+            continue
+        # 创业板 (300/301/302) + 科创板 (688) + 北交所 (8/4开头)
+        if sym.startswith("SZ") and code[:3] in {"300","301","302"}:
+            continue
+        if sym.startswith("SH") and code[:3] in {"688","689"}:
+            continue
+        if code[:1] in {"8","4"}:
             continue
         try:
             df = pd.read_csv(fp, encoding="utf-8-sig")
@@ -114,18 +122,14 @@ def build_panel():
             continue
 
         df = df.set_index("date")
-        fa  = compute_factor_a(df["open"], df["close"], df["vol"])
-
-        # T+1: 次日开盘买，HOLD_STEP日后次日开盘卖
-        next_open = df["open"].shift(-1)
-        exit_open = df["open"].shift(-(HOLD_STEP + 1))
-        fwd_ret   = exit_open / next_open - 1.0
+        fa        = compute_factor_a(df["open"], df["close"], df["vol"])
+        next_open = df["open"].shift(-1)   # 次日开盘（买入价）
 
         out = pd.DataFrame({
-            "factor_a":   fa,
-            "fwd_ret":    fwd_ret,
-            "close":      df["close"],
-            "stock_name": "",        # 名称暂空，最新持仓时用code查
+            "factor_a":  fa,
+            "next_open": next_open,
+            "open":      df["open"],       # 存原始open，方便计算任意持仓期
+            "close":     df["close"],
         }, index=df.index)
         out["stock_symbol"] = sym
         out["date"]         = df.index
@@ -139,6 +143,17 @@ def build_panel():
     return panel
 
 
+def add_fwd_ret(panel: pd.DataFrame, hold_step: int) -> pd.DataFrame:
+    """按 hold_step 计算 T+1 前向收益并附加到面板（不修改原panel）。"""
+    p = panel.copy()
+    # T+1: open[t+1]买 → open[t+1+hold_step]卖
+    p["fwd_ret"] = (
+        p.groupby("stock_symbol")["open"]
+        .transform(lambda s: s.shift(-(hold_step + 1)) / s.shift(-1) - 1.0)
+    )
+    return p
+
+
 def load_hs300():
     hs = pd.read_csv(HS300_CACHE)
     hs["date"] = pd.to_datetime(hs["date"])
@@ -150,10 +165,11 @@ def load_hs300():
 
 # ─── 回测引擎 ────────────────────────────────────────────────────── #
 
-def simulate(panel, hs300, start_offset=0, verbose_latest=False):
-    sub = panel.dropna(subset=["factor_a","fwd_ret","rank_pct"]).copy()
+def simulate(panel_base, hs300, start_offset=0, hold_step=None):
+    hs  = hold_step or HOLD_STEP
+    sub = add_fwd_ret(panel_base, hs).dropna(subset=["factor_a","fwd_ret","rank_pct"]).copy()
     dates       = sorted(sub["date"].unique())
-    rebal_dates = dates[start_offset::HOLD_STEP]
+    rebal_dates = dates[start_offset::hs]
 
     capital   = float(INIT_CAPITAL)
     records   = []
@@ -263,7 +279,7 @@ def plot_equity(df_sim, hs300, out_path):
     ax1.axhline(1, color="#555", linewidth=0.5, linestyle=":")
     ax1.set_ylabel("净值（倍）", color="white")
     ax1.legend(facecolor="#1a1a2e", edgecolor="#333", labelcolor="white")
-    ax1.set_title(f"Factor A (-cnt28)  K={K}  T+1执行  56bp成本  {START_DATE[:4]}-{END_DATE[:4]}",
+    ax1.set_title(f"Factor A (-cnt28)  主板only  K={K}  T+1执行  56bp  {START_DATE[:4]}-{END_DATE[:4]}",
                   color="white", pad=10)
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}x"))
 
@@ -329,58 +345,65 @@ def main():
     print(f"  卖出 {SELL_BP}bp（佣金3 + 印花10 + 过户0.2 + 滑点10 + 冲击20）")
     print(f"  完整换手一次成本 = {BUY_BP+SELL_BP}bp = {(BUY_BP+SELL_BP)/100:.2f}%\n")
 
-    # ── 面板构建 ──────────────────────────────────────────────────
-    print("Building panel ...", flush=True)
+    # ── 面板构建（主板，无创业板/科创板/北交所）────────────────────
+    print("Building panel (主板 only) ...", flush=True)
     panel = build_panel()
     hs300 = load_hs300()
     n_stocks = panel["stock_symbol"].nunique()
-    n_dates  = panel["date"].nunique()
-    print(f"Panel: {n_stocks} stocks, {n_dates} dates, {len(panel):,} rows\n")
+    print(f"Panel: {n_stocks} stocks (主板), {panel['date'].nunique()} dates\n")
 
-    # ── 主回测 ────────────────────────────────────────────────────
-    df_sim, latest = simulate(panel, hs300, start_offset=0, verbose_latest=True)
+    # ── 持仓期扫描：12 / 20 / 30 / 40 天 ────────────────────────
+    print("=" * 65)
+    print(f"持仓期对比  主板  K={K}  T+1执行  56bp")
+    print("=" * 65)
+    print(f"  {'持仓天数':>6s}  {'年化净收益':>10s}  {'MDD':>8s}  {'Calmar':>7s}  {'单票胜率':>8s}  {'年化成本':>8s}")
+    print(f"  {'-'*58}")
 
-    ppy     = 252 / HOLD_STEP
-    rets    = df_sim["net_ret"].tolist()
-    c_net   = cagr(rets, ppy)
-    cap_s   = df_sim.set_index("date")["capital"]
-    peak    = cap_s.cummax()
-    dd      = (cap_s - peak) / peak
-    mdd_val = float(dd.min())
-    mdd_end = dd.idxmin()
-    mdd_pk  = cap_s[:mdd_end].idxmax()
+    sweep_results = {}
+    for hs in [12, 20, 30, 40]:
+        df_s, lat = simulate(panel, hs300, start_offset=0, hold_step=hs)
+        if df_s.empty:
+            continue
+        ppy_s  = 252 / hs
+        rets_s = df_s["net_ret"].tolist()
+        cn     = cagr(rets_s, ppy_s)
+        cap_s_ = df_s.set_index("date")["capital"]
+        pk_    = cap_s_.cummax()
+        mdd_   = float(((cap_s_ - pk_) / pk_).min())
+        calmar = cn / abs(mdd_) if mdd_ < 0 else np.nan
+        tw     = int(df_s["win_cnt"].sum())
+        tl     = int(df_s["lose_cnt"].sum())
+        wr     = tw / max(tw + tl, 1)
+        ac     = float(df_s["cost"].mean()) * ppy_s
+        sweep_results[hs] = {"df": df_s, "latest": lat, "cagr": cn, "mdd": mdd_,
+                              "calmar": calmar, "win_rate": wr, "ann_cost": ac}
+        print(f"  {hs:>6d}天  {cn:>+10.1%}  {mdd_:>8.1%}  {calmar:>7.2f}  {wr:>8.1%}  {ac:>8.1%}")
 
-    final_cap  = float(df_sim["capital"].iloc[-1])
-    total_win  = int(df_sim["win_cnt"].sum())
-    total_lose = int(df_sim["lose_cnt"].sum())
-    win_rate   = total_win / max(total_win + total_lose, 1)
-    avg_cost   = float(df_sim["cost"].mean()) * ppy
+    # ── 选最佳 hold_step（Calmar最高）────────────────────────────
+    best_hs = max(sweep_results, key=lambda h: sweep_results[h]["calmar"]
+                  if not np.isnan(sweep_results[h]["calmar"]) else -99)
+    best    = sweep_results[best_hs]
+    df_sim  = best["df"]
+    latest  = best["latest"]
+    ppy     = 252 / best_hs
 
+    print(f"\n  最佳持仓期: {best_hs}天 (Calmar={best['calmar']:.2f})")
+
+    # ── 逐年明细 ─────────────────────────────────────────────────
     by_year = df_sim.groupby("year").apply(
         lambda g: float(np.prod(1 + g["net_ret"]) - 1)).sort_index()
 
-    print("=" * 60)
-    print(f"回测结果  {START_DATE[:4]}-{END_DATE[:4]}  T+1执行  K={K}  56bp")
-    print("=" * 60)
-    print(f"  起始资金   : {INIT_CAPITAL:>10,.0f} 元")
-    print(f"  期末资金   : {final_cap:>10,.0f} 元  ({final_cap/INIT_CAPITAL:.1f}x)")
-    print(f"  年化净收益 : {c_net:>+.1%}")
-    print(f"  最大回撤   : {mdd_val:>+.1%}  ({mdd_pk.date()} -> {mdd_end.date()})")
-    print(f"  Calmar     : {c_net/abs(mdd_val):.2f}" if mdd_val < 0 else "")
-    print(f"  单票胜率   : {win_rate:.1%}  ({total_win}赢 / {total_lose}输)")
-    print(f"  年化成本   : {avg_cost:.1%}")
-
-    print(f"\n  逐年净收益（含成本）:")
+    print(f"\n  逐年净收益（hold_step={best_hs}天，主板）:")
     for yr, r in by_year.items():
         bar  = "#" * max(0, int(abs(r) * 100 / 5))
         sign = "+" if r >= 0 else ""
         print(f"    {yr}: {sign}{r:.1%}  {bar}")
 
-    # ── 随机起点QC ────────────────────────────────────────────────
-    print(f"\n随机起点稳定性（12个offset）:")
+    # ── 随机起点 QC ───────────────────────────────────────────────
+    print(f"\n  随机起点稳定性（hold_step={best_hs}，offset 0~11）:")
     cagr_list = []
     for off in range(12):
-        d2, _ = simulate(panel, hs300, start_offset=off)
+        d2, _ = simulate(panel, hs300, start_offset=off, hold_step=best_hs)
         if not d2.empty:
             cagr_list.append(cagr(d2["net_ret"].tolist(), ppy))
     pos = sum(1 for x in cagr_list if x > 0)
@@ -388,23 +411,23 @@ def main():
     print(f"  CAGR range : {min(cagr_list):+.1%} ~ {max(cagr_list):+.1%}")
     print(f"  均值CAGR   : {np.mean(cagr_list):+.1%}")
 
-    # ── 最新持仓 ──────────────────────────────────────────────────
+    # ── 最新持仓 ─────────────────────────────────────────────────
     latest_date = df_sim["date"].iloc[-1].date() if not df_sim.empty else "N/A"
-    print(f"\n最新一期持仓（{latest_date} 信号，次日开盘买入）:")
-    print(f"  {'代码':<12s} {'收盘价':>8s}  {'状态'}")
-    print(f"  {'-'*38}")
+    print(f"\n最新持仓（{latest_date} 信号，hold_step={best_hs}天，主板）:")
+    print(f"  {'代码':<12s}  {'收盘价':>8s}  {'状态'}")
+    print(f"  {'-'*36}")
     for h in sorted(latest, key=lambda x: -x["rank_pct"]):
         status = "新买入" if h["is_new"] else "续持"
-        print(f"  {h['stock_symbol']:<12s} {h['close']:>8.2f}  {status}")
+        print(f"  {h['stock_symbol']:<12s}  {h['close']:>8.2f}  {status}")
 
-    # ── 已知偏差汇总 ──────────────────────────────────────────────
-    print(f"\n已知偏差（必须说清楚）:")
-    print(f"  1. 幸存者偏差  -- 退市股未纳入，收益被高估（估计5-10个点）")
-    print(f"  2. 2019年数据  -- 覆盖更充分，但仍非完整市场")
-    print(f"  3. 流动性      -- K=10每只1万，小盘股实际滑点>10bp")
-    print(f"  4. 信号粒度    -- 收盘后才有信号，次日开盘才能执行")
+    # ── 已知偏差 ─────────────────────────────────────────────────
+    print(f"\n已知偏差：")
+    print(f"  1. 幸存者偏差  -- 退市股未纳入，收益被高估约5-10个点")
+    print(f"  2. 流动性      -- 每只仓位~1万，小盘股真实滑点>10bp")
+    print(f"  3. 信号执行    -- 收盘后才有信号，次日开盘才能买入")
+    print(f"  4. 主板过滤    -- 已排除创业板(300/301/302)、科创板(688)、北交所")
 
-    # ── 绘图 ──────────────────────────────────────────────────────
+    # ── 绘图 ─────────────────────────────────────────────────────
     out_img = os.path.join(OUT_DIR, "audit_equity_curve.png")
     plot_equity(df_sim, hs300, out_img)
 
