@@ -8,11 +8,18 @@ Hot Sector Signal — 板块热度 × Factor A干净池 × 未涨停筛选
   4. 目标：热点板块 ∩ Factor A干净池 ∩ 今日未涨停 → 可能明日补涨
 
 Run:
-    python research/factors_v2/run_hot_sector_signal.py
+    python research/factors_v2/run_hot_sector_signal.py          # 只打印
+    python research/factors_v2/run_hot_sector_signal.py --push   # 打印 + 推送钉钉
 """
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import sys
+import time
+import urllib.parse
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -194,7 +201,7 @@ def main():
 
     if zt_all.empty:
         print("  [!] 无法获取涨停数据，退出")
-        return
+        return None
 
     print(f"\n  历史涨停记录: {len(zt_all)} 条  |  今日涨停: {len(today_zt_codes)} 只")
 
@@ -310,6 +317,127 @@ def main():
     print(f"  干净池  → {out_clean}")
     print(f"\n{'='*65}\n")
 
+    return dict(
+        today=today,
+        sector_heat=sector_heat,
+        df_cand=df_cand,
+        zt_clean_ref=zt_clean_ref,
+        zt_all=zt_all,
+        clean_codes=clean_codes,
+    )
+
+
+# ── 钉钉推送 ──────────────────────────────────────────────────────────── #
+
+def _ding_sign(webhook: str, secret: str) -> str:
+    """HMAC-SHA256 加签，返回带时间戳+签名的完整 URL。"""
+    ts = str(round(time.time() * 1000))
+    msg = f"{ts}\n{secret}"
+    sig = base64.b64encode(
+        hmac.new(secret.encode(), msg.encode(), digestmod=hashlib.sha256).digest()
+    )
+    return f"{webhook}&timestamp={ts}&sign={urllib.parse.quote_plus(sig)}"
+
+
+def _build_markdown(result: dict) -> tuple[str, str]:
+    """构建钉钉 Markdown 消息（标题 + 正文）。"""
+    today        = result["today"]
+    sector_heat  = result["sector_heat"]
+    df_cand      = result["df_cand"]
+    zt_clean_ref = result["zt_clean_ref"]
+    zt_all       = result["zt_all"]
+    clean_codes  = result["clean_codes"]
+
+    title = f"热点板块选股 {today} 葵花宝典"
+
+    lines = [f"## 热点板块候选股 — {today}\n"]
+
+    # 热点板块
+    lines.append("### 近5日热点板块（涨停集中度）\n")
+    for _, row in sector_heat.head(TOP_SECTOR_N).iterrows():
+        lines.append(f"- **{row['sector']}** 涨停{int(row['涨停次数'])}次  {row['代表股']}")
+    lines.append("")
+
+    # 候选股（按板块）
+    if df_cand.empty:
+        lines.append("### 候选股\n暂无符合条件的股票\n")
+    else:
+        lines.append(f"### 候选股（热点板块 × 干净 × 今日未涨停）共{len(df_cand)}只\n")
+        hot_sectors = sector_heat.head(TOP_SECTOR_N)["sector"].tolist()
+        for sector in hot_sectors:
+            sub = df_cand[df_cand["sector"] == sector]
+            if sub.empty:
+                continue
+            lines.append(f"**【{sector}】** {len(sub)}只")
+            for _, r in sub.iterrows():
+                lines.append(
+                    f"- {r['stock_symbol']} {r['stock_name']}  ¥{r['close']:.2f}"
+                )
+            lines.append("")
+
+    # 今日涨停×干净（参考）
+    if zt_clean_ref:
+        lines.append(f"### 参考：今日涨停 × 干净池  {len(zt_clean_ref)}只（已发动）\n")
+        shown = 0
+        for code in zt_clean_ref[:8]:
+            sym  = ("SH" + code) if code.startswith("6") else ("SZ" + code)
+            name_rows = zt_all[zt_all["stock_code"] == code]
+            name = str(name_rows["stock_name"].iloc[0]) if not name_rows.empty else ""
+            lines.append(f"- {sym} {name}")
+            shown += 1
+        if len(zt_clean_ref) > shown:
+            lines.append(f"- …共{len(zt_clean_ref)}只")
+        lines.append("")
+
+    lines.append("> 候选逻辑：板块近期有涨停（热度验证）+ 个股无出货信号(cnt28=0) + 今日未涨停（未追高）")
+    lines.append("> 板块映射来自近15日涨停历史，手动确认走势后再操作")
+
+    return title, "\n".join(lines)
+
+
+def send_dingtalk(result: dict) -> bool:
+    """同步推送到钉钉，读取 config.py 中的 Webhook/Secret。"""
+    try:
+        import requests
+    except ImportError:
+        print("  [!] pip install requests")
+        return False
+
+    try:
+        from config import DINGTALK_WEBHOOK, DINGTALK_SECRET
+    except ImportError:
+        DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")
+        DINGTALK_SECRET  = os.environ.get("DINGTALK_SECRET", "")
+
+    if not DINGTALK_WEBHOOK:
+        print("  [!] DINGTALK_WEBHOOK 未配置（config.py 或环境变量），跳过推送")
+        return False
+
+    title, text = _build_markdown(result)
+    url = _ding_sign(DINGTALK_WEBHOOK, DINGTALK_SECRET) if DINGTALK_SECRET else DINGTALK_WEBHOOK
+
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {"title": title, "text": text},
+        "at": {"isAtAll": False},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        body = resp.json()
+        if body.get("errcode") == 0:
+            print("  钉钉推送成功 ✓")
+            return True
+        else:
+            print(f"  钉钉推送失败: {body}")
+            return False
+    except Exception as e:
+        print(f"  钉钉推送异常: {e}")
+        return False
+
 
 if __name__ == "__main__":
-    main()
+    push = "--push" in sys.argv
+    result = main()
+    if push and result:
+        print("\n推送到钉钉...")
+        send_dingtalk(result)
