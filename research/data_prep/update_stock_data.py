@@ -19,7 +19,7 @@ import baostock as bs
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 STOCK_DATA_DIR = os.path.join(ROOT, "data", "stock_data")
-TARGET_END = "2026-04-11"  # Update to this date
+TARGET_END = "2026-04-18"  # Update to this date
 
 
 def _bs_code(sym: str) -> str:
