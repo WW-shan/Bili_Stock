@@ -1,0 +1,589 @@
+# v2 Factor Library — First Findings (2026-04)
+
+## TL;DR
+
+On the **correct universe** (3700 liquid A-share equities, not the 561
+Xueqiu-active subset), the classic low-volatility factor is a clearly
+stronger signal than the Xueqiu consensus factor.
+
+| factor              | IC      | ICIR  | hit% | turnover/p | ann_cost | spread_ann | net_top_ann |
+|---------------------|---------|-------|------|-----------:|---------:|-----------:|------------:|
+| xueqiu (baseline)   | 0.0124  | 0.137 | 55.3 |      14.9% |    1.76% |      0.04% |      14.34% |
+| low_volatility      | 0.0335  | 0.171 | 56.4 |      35.8% |    4.20% |     15.53% |       5.37% |
+
+Period: 2015-01-01 → 2025-12-31. Panel: 2,910,469 rows, 3,700 stocks, 2,674 dates.
+
+> **2026-04 update — survivorship-adjusted numbers.** After backfilling 232
+> delisted names via baostock (see "Post-Backfill Numbers" below), the
+> 19.9% paper net_top drops to **13.17%** and the best-overlay Calmar
+> config drops to **14.90% CAGR / −57.2% MDD**. The 3-8pp haircut
+> estimate landed at **~6pp on the core net number, plus ~15-19pp of
+> worse MDD**. This is the realistic survivorship-adjusted baseline for
+> everything below.
+
+## Universe matters
+
+Running low_vol on the Xueqiu-filtered panel (561 stocks) gave
+`spread_ann = -8.38%` — an apparent negative factor. Moving to the
+broad liquid A-share universe flipped it to `+15.53%`. Same factor,
+same code, 24-point swing from universe alone.
+
+Xueqiu subset is skewed toward momentum/attention-driven names
+(Barber & Odean 2008). Low-vol anomaly cannot exist in a universe
+pre-selected for retail attention.
+
+## Xueqiu top-quintile looks great, isn't really alpha
+
+Xueqiu factor shows `net_top_ann = 14.34%` — tempting. But:
+- spread between top-quintile and bottom-quintile = 0.04% (zero).
+- Bottom quintile of Xueqiu factor returns ~14% too.
+- The 14% isn't *ranking* alpha; it's *universe* alpha — the set of
+  Xueqiu-active stocks itself outperforms broad market.
+
+Implication: if there's a monetizable signal in the cubes.db data,
+it's "which stocks cubes follow at all", not "which stocks cubes
+rank higher". This matches the structural reflection in
+`docs/quant_strategy_lessons.md`.
+
+## Low-vol turnover is suspiciously high
+
+35.8% per 12-bday rebalance is much higher than the low-vol
+literature would predict. Likely causes:
+- 60-bday vol window is short enough that many stocks cluster near
+  the top-quintile cutoff; tiny vol shifts flip ranks.
+- Rebalancing every 12 bdays amplifies this cluster churn.
+
+Cost-reduction levers for next iteration:
+- Window: 60 → 120 bdays  (halves factor volatility)
+- Hold step: 12 → 60 bdays (cuts periods/year from 21 to 4)
+- Minimum-change threshold: only rebalance a stock if its rank
+  percentile moves >10 points
+
+Even a 50% turnover cut drops ann_cost from 4.20% → ~2.1%, pushing
+net_top_ann toward 7.5% before factor improvements.
+
+## Turnover Optimization Grid (2026-04)
+
+Ran two experiments on low_vol to test whether the 35.8% per-period
+turnover was fixable.
+
+### 1. `(vol_window, hold_step)` grid
+
+Nine combinations of window ∈ {60, 120, 250} × hold_step ∈ {12, 30, 60}.
+Returns computed as true CAGR (product of per-period returns), which
+drops the naively-compounded `(1+mean)^n` numbers by ~5pp for
+high-volatility factors.
+
+Best config: **window=60, hold_step=12** (the baseline).
+
+Key finding: longer hold_step reduces annualized cost (4.21% → 1.39%
+at hs=60), but kills top_ann faster than cost savings:
+
+| config         | top_ann | ann_cost | **net_top** |
+|---------------|--------:|--------:|----------:|
+| w=60, hs=12   |  22.79% |  4.21%  | **18.59%** |
+| w=60, hs=30   |  12.83% |  2.36%  |  10.47%    |
+| w=60, hs=60   |  10.48% |  1.39%  |   9.09%    |
+| w=120, hs=12  |  18.54% |  3.69%  |  14.86%    |
+| w=250, hs=12  |  19.50% |  3.15%  |  16.35%    |
+
+Low-vol alpha lives in short-horizon vol mean-reversion. Longer hold
+trades it away. Window sweep similarly: longer windows smooth the
+signal too much and lose contemporaneity.
+
+### 2. Buffered rebalancing
+
+Hysteresis: a stock enters at rank >= 0.80, leaves only below
+`keep_q`. Same top-20% target, stickier holdings.
+
+| keep_q         | turn/p | ann_cost | top_ann | **net_top** | Δ vs baseline |
+|---------------|-------:|--------:|-------:|----------:|---------:|
+| 0.80 (none)   |  35.8% |  4.22%  | 23.01% |  18.79%   | baseline |
+| **0.70**      |  **27.2%** |  **3.20%**  | **23.05%** |  **19.86%** |  **+1.06pp** |
+| 0.60          |  22.8% |  2.68%  | 21.55% |  18.87%   | +0.08pp  |
+| 0.50          |  20.4% |  2.40%  | 21.38% |  18.98%   | +0.18pp  |
+
+**Sweet spot: `keep_q=0.70`**. Turnover −24%, cost −1pp, top_ann
+unchanged, +1.06pp net. Beyond 0.70 we keep stocks that have drifted
+out of the quality zone — top_ann falls by roughly what cost saves.
+
+### Production-candidate config (low_vol v1)
+
+```
+vol_window  = 60 bdays
+hold_step   = 12 bdays
+enter_q     = 0.80
+keep_q      = 0.70  (buffered)
+round_trip  = 56 bp (production cost model)
+universe    = broad A-share equities, top 60% liquidity (20% in bull)
+→  net_top_ann ≈ 19.9% (paper long-only, pre-realistic-execution)
+```
+
+### Caveats on the 19.9% number
+
+This is a paper long-only top-quintile number. It does NOT yet include:
+- Regime filter (bear-market drawdown control)
+- T+1 lock impact beyond 56bp round-trip
+- **Survivorship bias — confirmed severe (see below)**
+- VWAP / open-execution slippage
+- Dividend reinvestment consistency check
+
+Production realistic haircut: expect 30-50% of paper alpha to survive,
+landing at 10-14% net annualized — still far better than the Xueqiu
+strategy's audited ~2%.
+
+## Survivorship Bias Audit (2026-04)
+
+`research/factors_v2/check_survivorship.py` last-date scan of all 3,721
+A-share equity CSVs in `data/stock_data/`:
+
+| last_date year | stocks |
+|----------------|-------:|
+| 2020           |      1 |
+| 2021           |      1 |
+| 2022           |      3 |
+| 2023           |      1 |
+| 2024           |      4 |
+| 2025           |      4 |
+| 2026           |  3,707 |
+
+**99.6% of the universe is "still alive today".** Only 14 stocks have
+a last-date before 2026. 2015-2025 saw hundreds of A-share delistings
+(especially post-2020 with the stricter delisting rules) — essentially
+none are represented.
+
+Spot-check of 8 well-known delistings: **7 missing outright** (乐视网,
+华锐风电, 退市海润, *ST富控, 退市长油, *ST长生, 信威集团). Only 康得新
+is present, ending 2021-05-31 right before its 2021-07 delisting.
+
+### Impact on the 19.9% (differential by quintile)
+
+- **Top quintile (low-vol longs)**: small impact. Delisting names were
+  almost all high-vol crashing stocks, which would have sat in the
+  bottom quintile anyway.
+- **Bottom quintile (high-vol)**: materially understated. The worst
+  outcomes (→0) are excluded.
+- **Spread (long-short)**: significantly inflated — would overstate
+  a long-short backtest by a lot.
+- **Long-only top (our 19.9%)**: directionally correct, but there is
+  a **shadow bias**: some stocks looked low-vol *before* crashing and
+  would have been picked up by the top quintile. Their post-inclusion
+  crash returns are missing.
+
+Rough estimate for long-only: **3-8pp of the 19.9% is survivorship
+air**. Not fatal for a long-only strategy, but the residual net alpha
+is ≈ **12-17%** before other haircuts, not 19.9%.
+
+Next step to close this: pull a delisted-ticker list from
+AKShare (`stock_info_sh_delist` / `stock_info_sz_delist`) or Tushare,
+backfill missing CSVs, and re-run. Deferred — requires external data.
+
+## Regime-Stratified Analysis (2026-04)
+
+Question: where in the 222-period sample does the 19.9% net alpha
+actually live? Buffered config (w=60, hs=12, enter=0.80, keep=0.70),
+gross returns, regime = HS300 20-day return bucket at rebalance date.
+
+### By HS300 regime (at rebalance date)
+
+| Regime | Periods | Mean/period | CAGR-if-always | log-return share |
+|--------|--------:|------------:|---------------:|-----------------:|
+| 上涨   |      72 |       0.83% |         14.57% |           21.3%  |
+| 震荡   |      99 |       1.23% |         24.84% |           47.7%  |
+| 下跌   |      51 |       1.52% |         32.34% |           31.0%  |
+
+**Counterintuitive finding**: only 21.3% of cumulative log-return is
+earned in 上涨 regimes. **Low-vol makes most of its money in sideways
+and declining markets** — the classic defensive-premium anomaly (Ang
+2006): when HS300 is already down 3%+ over 20 days, quality/low-vol
+names get flight-to-quality bid, then ride the rebound.
+
+Implication for production: **no need to scale down in 下跌 regimes**
+— the factor works best there. The regime to worry about is 上涨.
+
+### By calendar year (gross annual return)
+
+| Year | Dominant regime | Annual ret | log_share |
+|-----:|:---------------:|-----------:|----------:|
+| 2015 | 上涨            |   **+51.3%** |    18.9% |
+| 2016 | 上涨            |     +33.9% |    13.3% |
+| 2017 | 震荡            |     +11.7% |     5.1% |
+| **2018** | **下跌**    | **-26.9%** |  **-14.3%** |
+| 2019 | 震荡            |   **+60.5%** |    21.6% |
+| 2020 | 上涨            |     +29.3% |    11.7% |
+| 2021 | 震荡            |   **+46.1%** |    17.3% |
+| 2022 | 下跌            |      +4.7% |     2.1% |
+| 2023 | 震荡            |      -4.9% |    -2.3% |
+| 2024 | 震荡            |     +29.7% |    11.8% |
+| 2025 | 上涨            |     +38.4% |    14.8% |
+
+9 positive years, 2 negative. Four big winners (2015, 2019, 2021, 2025)
+account for 72.6% of cumulative log-return — **but they are 2 上涨 +
+2 震荡 years, not a pure bull-market concentration**.
+
+### 2018 is the elephant
+
+**-26.9% in a single year.** Low-vol is a factor, not a hedge:
+broad bear market selloffs drag quality names down too (just less
+than the junk names, which is what shows up as the factor premium).
+
+Per-period CAGR-if-always numbers (32% in 下跌) hide this: within
+any given 12-day bear-regime window the factor rebounds, but stringing
+21 bear periods together in 2018 compounded to -27%.
+
+### Implications for production sizing
+
+| Layer                                | Paper   | Realistic   |
+|--------------------------------------|--------:|------------:|
+| Top-quintile gross (CAGR)            | 23.05%  |             |
+| − trading cost (buffered, 56bp)      |  3.20%  |             |
+| = paper long-only net                | 19.85%  |             |
+| − survivorship haircut (3-8pp)       |         |   11.9-16.9% |
+| − max-drawdown overlay needed for 2018-type years? |         |     ?       |
+
+The 19.9% number is correct given the data, but the data has two
+known holes: survivorship (fixable via delisting list) and factor
+timing (not fixable — needs a market-regime overlay on top of the
+factor to protect the -27% tail).
+
+**Recommended production wrap** (superseded by 2026-04 overlay test — see below):
+1. Low-vol (buffered) as core stock selector
+2. ~~HS300 20-day momentum overlay~~ — see overlay test: only extreme
+   tail (<-10% 20d) helps; mid-range thresholds COST alpha
+3. Survivorship backfill via AKShare delisting list as prerequisite
+   for any real deployment
+
+## Overlay Test (2026-04): Can a Market Filter Save 2018?
+
+Tested two overlay families on the buffered config:
+
+**Short-horizon (HS300 20-day return)** — grid of threshold × scale_off:
+
+| Overlay                 | CAGR_n | MDD     | Calmar | 2018    | 2022   |
+|-------------------------|-------:|--------:|-------:|--------:|-------:|
+| Baseline (no overlay)   | 19.16% | -43.88% |  0.44  | -28.97% | +2.23% |
+| 20d < -3%  → 0.00       | 10.62% | -39.50% |  0.27  | -36.34% | -15.25% |
+| 20d < -5%  → 0.50       | 17.60% | -37.75% |  0.47  | -29.56% |  -1.51% |
+| **20d < -10% → 0.00**   |**20.35%**|**-38.03%**|**0.54**| -28.84% |  +2.23% |
+
+**Long-horizon (trend filters)** — tested to attack the 2018 grinding bear:
+
+| Overlay                   | CAGR_n | MDD     | Calmar | 2018    | t_off |
+|---------------------------|-------:|--------:|-------:|--------:|------:|
+| 60d < -10% → 0.00         | 13.73% | -59.78% |  0.23  | -34.29% | 11.7% |
+| close < SMA120 → 0.00     |  8.08% | -39.13% |  0.21  | -10.88% | 45.0% |
+| close < SMA120 → 0.50     | 13.93% | -38.99% |  0.36  | -20.12% | 45.0% |
+| close < SMA200 → 0.50     | 13.94% | -40.65% |  0.34  | -20.59% | 44.1% |
+
+### Why trend filters fail
+
+The factor's own regime analysis (above) showed **31% of cumulative
+log-return is earned during 下跌 regimes**. Trend filters that shut
+off the book during trend-down market periods cut the factor from
+its main source of alpha.
+
+- SMA-200 breach is ON 44% of the sample — killing half the alpha
+- 60-day return < -10% misses the V-shape rebounds that the factor
+  specifically captures
+
+**Only the extreme tail works**: HS300 20-day return < -10% (triggers
+only 3.6% of the sample — ~2008/2015-crash/2020-covid style events).
+Those periods are when the factor's defensive premium fails (liquidity
+crisis → indiscriminate selling).
+
+### Best achievable overlay
+
+**Production overlay: `HS300_ret20 < -10% → scale_to_0.00`**
+
+- CAGR_net: 19.16% → 20.35% (+1.19pp)
+- MDD:      -43.88% → -38.03% (+5.85pp)
+- Calmar:    0.44 → 0.54 (+23%)
+- 2018:     -28.97% → -28.84% (unchanged — overlay doesn't fire)
+
+The 2018 problem is **not overlay-solvable with market-trend signals**.
+Fixing it requires a structural change (position-sizing by portfolio
+vol, multi-factor hedging, or long-short pair construction — the last
+is closed off for retail A-share). Deferred until after fundamentals
+stack is built.
+
+## Post-Backfill Numbers (2026-04, survivorship-adjusted)
+
+Delisting backfill completed via baostock (AKShare/Eastmoney rate-
+limited on first attempt). 51 new CSVs written from a target set of
+243 A-share delistings in 2014-2026; 192 were already on disk. The
+panel builder was patched with a `成交额`-from-CSV fallback because
+the external `liquidity_daily_v1.csv` doesn't cover the backfilled
+delisted names — without this patch the new CSVs would be silently
+dropped by the liquidity filter (and the post-backfill panel would be
+bit-identical to the pre-backfill one, which is how the first run
+looked).
+
+Panel: **3,118,699 rows, 3,932 stocks** (was 2,910,469 / 3,700).
+`build_broad_panel.py` last-date scan: **248 stocks with last_date
+before 2026** (was 14).
+
+### Headline haircut
+
+Buffered production config (w=60, hs=12, enter=0.80, keep=0.70, 56bp
+round-trip), no overlay:
+
+| metric       | pre-backfill | post-backfill | Δ      |
+|--------------|-------------:|--------------:|-------:|
+| CAGR_gross   | 23.05%       | 16.92%        | −6.13pp |
+| CAGR_net     | **19.16%**   | **13.17%**    | **−5.99pp** |
+| MDD          | −43.88%      | **−64.73%**   | **−20.85pp** |
+| Calmar       | 0.44         | 0.20          | −0.24  |
+| ann turnover cost | 3.20%   | 3.28%         | +0.08pp |
+
+**The survivorship haircut landed at ~6pp on CAGR_net**, right at the
+upper end of the 3-8pp pre-backfill estimate. More dramatic is the
+**MDD blowing out by ~21pp** — the delisted names (many failed in
+2018, 2022-2024) dragged the tail significantly.
+
+### 2018 revealed
+
+Annual gross returns changed substantially in broad-bear years:
+
+| Year | pre-backfill | post-backfill | Δ      |
+|-----:|-------------:|--------------:|-------:|
+| 2015 | +51.3%       | +46.2%        | −5.1pp |
+| 2016 | +33.9%       | +24.4%        | −9.5pp |
+| 2017 | +11.7%       |  −4.3%        | −16.0pp |
+| **2018** | **−26.9%** | **−38.8%** | **−11.9pp** |
+| 2019 | +60.5%       | +56.9%        | −3.6pp |
+| 2020 | +29.3%       | +25.1%        | −4.2pp |
+| 2021 | +46.1%       | +42.6%        | −3.5pp |
+| 2022 |  +4.7%       |  +3.8%        | −0.9pp |
+| 2023 |  −4.9%       |  −5.9%        | −1.0pp |
+| 2024 | +29.7%       | +29.5%        | −0.2pp |
+| 2025 | +38.4%       | +38.2%        | −0.2pp |
+
+2017 and 2018 took the biggest hits (−16pp, −12pp). Recent years are
+nearly unchanged, which makes sense: the realistic delisting risk
+mostly lives in the 2014-2022 window, after which the stricter
+delisting rules had fully swept through.
+
+### Best-achievable overlay (re-run)
+
+| Config                        | CAGR_n | MDD     | Calmar | 2018    |
+|-------------------------------|-------:|--------:|-------:|--------:|
+| Baseline (no overlay)         | 13.17% | −64.73% |  0.20  | −40.69% |
+| **HS300 20d < −7% → 0.00**    |**14.65%**|**−56.22%**|**0.26**|−38.51%|
+| HS300 20d < −10% → 0.00       | 14.90% | −57.23% |  0.26  | −39.93% |
+
+The winning overlay threshold shifted from `−10% → 0.00` (pre-backfill,
+20.35%/−38.03%) to `−7% → 0.00` post-backfill. The tighter threshold
+triggers more often (6.3% vs 3.6% of sample), which is now needed
+because the actual drawdowns are deeper. Even so, 2018 only improves
+from −40.69% to −38.51% — **2018 remains structurally unfixable by
+market-trend overlay**, confirming the pre-backfill conclusion.
+
+### Regime breakdown (post-backfill)
+
+| Regime | Periods | Mean/period | CAGR-if-always | log-share |
+|--------|--------:|------------:|---------------:|----------:|
+| 上涨   |      72 |       0.66% |          9.4%  |    18.6% |
+| 震荡   |      99 |       1.00% |         18.3%  |    47.9% |
+| 下跌   |      51 |       1.26% |         25.6%  |    33.5% |
+
+Defensive-premium story holds: 下跌 is still the highest-mean regime
+and 下跌 + 震荡 still earns 81% of cumulative log-return. But all
+three means compressed — the pre-backfill regime table was itself
+biased upward, not just the CAGR.
+
+### What the realistic number is now
+
+| Layer                                | Paper   | Realistic     |
+|--------------------------------------|--------:|--------------:|
+| Top-quintile gross (CAGR)            | 16.92%  |               |
+| − buffered trading cost              |  3.28%  |               |
+| = long-only net, survivorship-adj    | 13.17%  |               |
+| + best overlay (HS300 20d < −7%)     |         |    **14.65%** |
+| − T+1/VWAP/open execution slippage   |         |   ~−1 to −2pp |
+| = **realistic post-execution**       |         |   **12-14%**  |
+
+The 12-14% realistic range is about where the pre-backfill "3-8pp
+haircut" estimate projected (11.9-16.9%). Close to 2x the audited
+Xueqiu strategy's ~2% net, but with a −57% MDD the risk-adjusted
+story needs the overlay and eventually a multi-factor stack to be
+deployable.
+
+## Multi-Factor Stack Research (2026-04-20)
+
+Tested three price-only factors as low_vol complements. Goal: reduce −57% MDD
+by stacking orthogonal signals. All tests on survivorship-adjusted broad panel.
+
+### Factors tested
+
+| Factor | IC | ICIR | Corr(lv) | Standalone net | Stack result |
+|--------|---:|-----:|--------:|---------------:|-------------:|
+| MAX (−max_20d) | +0.038 | 0.281 | +0.592 | 7.19% / −69.8% | 12.40% / −64.1% |
+| BAB (−beta_252d) | −0.015 | −0.109 | +0.194 | −0.70% / −89.2% | 7.98% / −79.8% |
+| Reversal (−ret_5d) | +0.015 | 0.133 | **−0.012** | +0.77% / −85.6% | 11.83% / −69.2% |
+
+### Conclusions
+
+**No price-only factor stack improved on low_vol alone.**
+
+- **MAX**: Strong IC/ICIR (0.038/0.281) but high correlation (+0.59) — stack is redundant.
+- **BAB**: IC is NEGATIVE in A-shares. High-beta stocks outperform in the
+  retail-dominated, bull-heavy 2015-2025 sample. BAB is a risk-adjusted
+  (Sharpe) story in US markets; raw long-only BAB fails in A-shares.
+- **Reversal**: Near-zero correlation (−0.012) is theoretically ideal, but
+  74% per-period turnover makes it unprofitable. 56bp costs eat the +0.015 IC.
+
+**Key structural insight**: The −64% MDD is systemic market risk (beta to broad
+A-share market), not a stock-selection problem. Adding more long-only equity
+factors cannot reduce it — they all crash together in 2018-type bear markets.
+
+### Best production candidate (confirmed)
+
+```
+low_vol  vol_window=60, hold_step=12, enter_q=0.80, keep_q=0.70
++ overlay: HS300 20d < −7% → scale_to_0
+→ CAGR_net 14.65% | MDD −56.22% | Calmar 0.26
+```
+
+This beats all stacks on every metric. The overlay (not factor stacking) is
+the right tool for market-risk management in a long-only framework.
+
+## Next groundwork
+
+1. ~~**Survivorship check**~~ — done. Knocked ~6pp off 19.9%.
+2. ~~**Regime-stratified analysis**~~ — done. Low-vol is NOT bull-
+   year dependent; 2018-type broad bear is the production risk.
+3. ~~**Bear-year overlay test**~~ — done. Only extreme 20d <-7%
+   helps (updated from -10% post-backfill). Trend filters destroy alpha.
+4. ~~**Delisting backfill**~~ — done via baostock. 232 additional
+   stocks, 51 newly-fetched delistings. Haircut quantified above.
+5. ~~**Multi-factor stack (price-only)**~~ — done. No improvement found.
+   MDD is systemic, not selectable. Best config is low_vol + overlay.
+6. ~~**Full QC**~~ — done. All three tests passed. See below.
+7. **Fundamentals ingestion** (deferred) — earnings_yield, roe_stability,
+   gross_profitability. Only worth pursuing after live paper-trade confirms
+   signal. Requires AKShare or Tushare token.
+
+## Production QC (2026-04-20) — ✓ PASSED
+
+Production config: `low_vol (vol_window=60, hold_step=12, enter_q=0.80, keep_q=0.70) + HS300 20d < −7% → scale_to_0`
+
+**Baseline**: CAGR_net +14.83%, MDD −55.41%, Calmar 0.268, overlay fires 6.3% of periods.
+
+### Test 1 — Randomized start-date (offset 0..11): ✓ PASS
+- 100% of 12 offsets have positive CAGR_net
+- Calmar range [0.105, 0.274], CV=0.37 (stable threshold <0.40)
+- Gradient: offset 0-3 Calmar ~0.24-0.27, offset 5-9 ~0.10-0.13. All positive.
+
+### Test 2 — hold_step sensitivity (8, 10, 12, 14, 16, 18, 20): ✓ PASS
+- Calmar range [0.196, 0.330], CV=0.15 (very stable)
+- No cliff edges. Compare: Xueqiu strategy had CV>1.0 on same test.
+- Note: hold_step=20 gives Calmar 0.330 / MDD −47.74% — not adopted because
+  faster rebalancing (hs=12) gives better factor responsiveness in live use.
+
+### Test 3 — Parameter grid (enter_q × keep_q, 3×3): ✓ PASS
+- 9/9 cells have Calmar > 0.15
+- Range 0.243–0.324. Production cell (★): 0.268.
+- Observation: enter_q=0.85 consistently outperforms 0.80 (range 0.286–0.324).
+  **Not adopting yet** — changing params after seeing QC results would be
+  p-hacking. Flag for v2 pre-registered test.
+
+### QC verdict: strategy is robust, ready for live paper-trade monitoring.
+
+## Files
+
+- `research/factors/factor_low_volatility.py` — factor builder
+- `research/factors_v2/build_broad_panel.py` — broad-universe panel
+- `research/factors_v2/run_v2_factor_ic.py` — initial IC comparison
+- `research/factors_v2/run_low_vol_turnover_grid.py` — window × hold grid
+- `research/factors_v2/run_low_vol_buffered.py` — buffered rebalance test
+- `research/factors_v2/check_survivorship.py` — last-date distribution audit
+- `research/factors_v2/run_low_vol_regime.py` — regime/year stratified analysis
+- `research/factors_v2/run_low_vol_overlay.py` — short-horizon 20d overlay grid
+- `research/factors_v2/run_low_vol_overlay_trend.py` — long-horizon trend-filter test
+- `research/factors_v2/build_low_vol_cache.py` — one-off factor cache builder
+- `research/factors_v2/cache/broad_panel_2015_2025_fwd10.pkl` — panel cache
+- `research/factors_v2/cache/low_vol_w60.pkl` — low_vol factor cache
+- `research/factors_v2/output/v2_factor_ic_comparison.csv`
+- `research/factors_v2/output/low_vol_turnover_grid.csv`
+- `research/factors_v2/output/low_vol_buffered.csv`
+- `research/factors_v2/output/survivorship_meta.csv`
+- `research/factors_v2/output/low_vol_regime_periods.csv`
+- `research/factors_v2/output/low_vol_by_regime.csv`
+- `research/factors_v2/output/low_vol_by_year.csv`
+- `research/factors_v2/output/low_vol_overlay_grid.csv`
+- `research/factors_v2/output/low_vol_overlay_trend.csv`
+- `research/factors/factor_max.py` — MAX (lottery reversal) factor
+- `research/factors/factor_bab.py` — BAB (betting against beta) factor
+- `research/factors/factor_reversal.py` — short-term reversal factor
+- `research/factors_v2/run_max_factor_ic.py` — MAX vs low_vol IC comparison
+- `research/factors_v2/run_max_buffered.py` — MAX buffered rebalance test
+- `research/factors_v2/run_lv_max_stack.py` — low_vol + MAX stack backtest
+- `research/factors_v2/run_bab_factor_ic.py` — BAB IC + stack backtest
+- `research/factors_v2/run_reversal_ic.py` — reversal IC + stack backtest
+- `research/factors_v2/run_production_qc.py` — full production QC (3 tests)
+- `research/factors_v2/output/max_factor_ic.csv`
+- `research/factors_v2/output/max_buffered.csv`
+- `research/factors_v2/output/lv_max_stack.csv`
+- `research/factors_v2/output/bab_factor_ic.csv`
+- `research/factors_v2/output/reversal_ic.csv`
+- `research/factors_v2/output/production_qc.csv`
+
+---
+
+## 2026-04-21 Update — 三层栈 & 小盘宇宙 & 核心教训
+
+### 实验 1: Layer 3 权重扫描 (基本面 + 情绪反向 + 低波)
+
+全宇宙 A 股, HOLD=20, K=20, 2017-2026 (9.1 年):
+
+| W_FUND/W_SENT/W_VOL | CAGR_net | MDD | Sharpe | Calmar | 换手 |
+|---|---:|---:|---:|---:|---:|
+| 1.0/0.0/0.0 (纯基本面) | +6.07% | -50.29% | 0.14 | 0.12 | 29% |
+| 0.4/0.3/0.3 (默认) | +6.81% | -43.52% | 0.18 | 0.16 | 35% |
+| **0.4/0.1/0.5** | **+8.39%** | **-37.82%** | **0.24** | **0.22** | 35% |
+| 0.3/0.2/0.5 | +8.32% | -39.67% | 0.24 | 0.21 | 35% |
+| 0.0/0.0/1.0 (纯低波) | +7.83% | -41.06% | 0.22 | 0.19 | 35% |
+| 0.0/1.0/0.0 (纯情绪反向) | +6.70% | -50.62% | 0.16 | 0.13 | 46% |
+
+**结论**: 低波权重 0.5 是最优区间，情绪反向贡献最小（0.1 够了），
+基本面 0.4 作为硬门槛而非打分主力。最佳组合 CAGR_net = 8.4%，
+仍**显著跑输** 红利低波 ETF 买入持有 (12.82%)。
+
+### 实验 2: 小盘宇宙 (60x/00x/300x/688 剔除大盘前15%) 三层栈
+
+相同权重 0.4/0.1/0.5, HOLD=20, K=20：
+
+| 标的 | CAGR_net | MDD | Calmar |
+|---|---:|---:|---:|
+| **小盘 3 层** | **+1.69%** | -30.67% | 0.05 |
+| 沪深 300 | +3.21% | -41.90% | 0.08 |
+| 中证 1000 ETF | +2.53% | -46.28% | 0.05 |
+| 创业板 ETF | +6.68% | -52.88% | 0.13 |
+| **红利低波 ETF 512890** | **+12.82%** | -14.14% | **0.91** |
+
+**结构性结论**: 小盘宇宙过滤让结果**恶化**（CAGR 从 8.4% → 1.7%）。
+小盘股票流动性差 + 波动大 + 基本面门槛卡掉太多标的 → 可选池子变窄，
+交易成本占比上升，年化成本 3.75% 吃掉大半粗收益 (4.81% → 1.69%)。
+换手 53% 明显高于全宇宙 35%。
+
+### 核心教训 (与 quant_structural_lessons 一致)
+
+1. **多因子不如一只红利低波 ETF**。9 年跑下来，任何多因子组合（包括最优低波权重）
+   的 CAGR_net 都跑不赢 512890 买入持有 (12.82%, -14.14% MDD, Calmar 0.91)。
+2. **Alpha 的真正来源是"避免追热点"**。红利低波的 14% MDD 和 0.91 Calmar 不是
+   因为因子多先进，而是因为行业分散 + 低估值 + 稳定分红 = 天然防守。
+3. **交易成本是最大敌人**。56bp 往返 × 35% 换手 × 12.6 期/年 ≈ 年化 2.5%-3.75%，
+   直接把 5% 原始 alpha 砍到 2%。
+4. **研究方向应转向**: (a) 红利低波 + 择时 overlay 降 MDD; (b) 质量+低波选股（若非要选股）;
+   (c) 红利低波/创业板 regime 轮动。**不要再堆因子数量**。
+
+### 新文件
+
+- `research/factors_v2/layer3_full_stack.py` — 基本面+情绪+低波三层栈
+- `research/factors_v2/layer3_weight_sweep.py` — 权重扫描
+- `research/factors_v2/smallcap_full_stack.py` — 小盘宇宙版本（已证伪）
+- `research/factors_v2/fetch_small_cap_etfs.py` — CSI500/CSI1000/创业板 ETF 抓取
+- `research/factors_v2/output/layer3_weight_sweep.csv`
+- `research/factors_v2/output/layer3_periods.csv`
+- `research/factors_v2/output/layer1_periods.csv`
+
