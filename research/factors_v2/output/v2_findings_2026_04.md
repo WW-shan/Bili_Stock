@@ -587,3 +587,124 @@ Production config: `low_vol (vol_window=60, hold_step=12, enter_q=0.80, keep_q=0
 - `research/factors_v2/output/layer3_periods.csv`
 - `research/factors_v2/output/layer1_periods.csv`
 
+---
+
+## 2026-04-21 续篇 — ETF 组合 vs 选股: 结构性胜负已分
+
+### 实验 3: 红利低波 择时 overlay (全部证伪)
+
+基于 512890, 2019-01 → 2026-04 (7.3 年):
+
+| Overlay | CAGR | MDD | Calmar |
+|---|---:|---:|---:|
+| Baseline 买入持有 | +12.74% | -16.53% | 0.77 |
+| A: SMA60 趋势 | -6.65% | -50.84% | -0.13 |
+| B: SMA60 滞回(-3%) | -1.02% | -33.63% | -0.03 |
+| C: HS300 ret60>-5% | +0.98% | -26.60% | 0.04 |
+| D: DD 熔断-8%/回 95% | -2.58% | -37.77% | -0.07 |
+| E: SMA60 & HS300 趋势 | -7.95% | -55.60% | -0.14 |
+| F: SMA120 趋势 | -3.68% | -38.32% | -0.10 |
+
+**结论**: 红利低波本身是均值回归品种，趋势 overlay 被 whipsaw
+砸得一塌糊涂。**单一资产择时 = 证伪**。
+
+### 实验 4: DIV ↔ GEM regime 轮动 vs 固定混合
+
+(2019-01 → 2026-04)
+
+| 策略 | CAGR | MDD | Calmar | Sharpe |
+|---|---:|---:|---:|---:|
+| DIV 买入持有 | +12.74% | -16.53% | 0.77 | 0.63 |
+| GEM 买入持有 | +16.29% | -56.58% | 0.29 | 0.47 |
+| R1 HS300_ret60>5%→GEM | +9.75% | -29.34% | 0.33 | 0.31 |
+| R2 HS300_ret60>0→GEM | +6.07% | -39.85% | 0.15 | 0.15 |
+| R5 60d 动量赢家 | +8.67% | -41.15% | 0.21 | 0.25 |
+| R6 120d 动量赢家 | +11.99% | -39.72% | 0.30 | 0.40 |
+| **R9 固定 DIV70/GEM30** | **+14.67%** | **-17.18%** | **0.85** | **0.72** |
+| R8 固定 DIV60/GEM40 | +15.17% | -20.71% | 0.73 | 0.71 |
+
+**结论**: **固定 DIV70/GEM30 完爆所有动态轮动规则**。regime/动量
+轮动每次切换吃 56bp，错过 rebound —— 损失远大于择时收益。
+
+### 实验 5: 多 ETF 静态组合 grid search
+
+扫描 DIV/HS300/GEM/CSI1K 58 个组合:
+
+| 组合 | CAGR | MDD | Calmar | Sharpe |
+|---|---:|---:|---:|---:|
+| **DIV70/GEM30 月再平衡** | **+14.78%** | **-17.29%** | **0.85** | **0.73** |
+| DIV80/GEM20 | +14.19% | -16.75% | 0.85 | 0.72 |
+| DIV60/GEM40 | +15.28% | -20.75% | 0.74 | 0.71 |
+| DIV50/GEM50 | +16.03% | -26.08% | 0.61 | 0.70 |
+
+**加 HS300 或 CSI1K 无增益** — 二元 DIV/GEM 吃掉所有可捕捉的 alpha。
+
+### 实验 6: Quality + LowVol Hybrid (证伪基本面门槛)
+
+基本面硬门槛 → 主板内 60 日低波 Top K, 2019-2026:
+
+| 配置 | CAGR_net | MDD | Calmar | 换手 |
+|---|---:|---:|---:|---:|
+| 无门槛 LV30 | +10.50% | -19.60% | 0.54 | 32% |
+| 宽松 LV20 | +9.22% | -28.71% | 0.32 | 34% |
+| 中等 LV30 | +11.97% | -43.54% | 0.27 | 30% |
+| 严格 LV20 | +4.17% | -40.72% | 0.10 | 25% |
+
+**反直觉结论**: 基本面门槛越严越差。低波因子本身已经隐含质量信号
+（低波股现金流稳定），再加硬门槛只是把池子变窄 → concentration 上升
+→ MDD 恶化。所有选股组合 **全部跑输** DIV70/GEM30。
+
+### 实验 7: DIV70/GEM30 再平衡频率 / Target vol / DD brake
+
+**再平衡频率** (DIV70/GEM30):
+
+| 频率 | CAGR | MDD | Calmar |
+|---|---:|---:|---:|
+| 永不 | +13.88% | -19.00% | 0.73 |
+| 年度 | +14.90% | -17.69% | 0.84 |
+| **季度** | **+15.15%** | **-17.61%** | **0.86** |
+| **月度** | **+15.09%** | **-17.35%** | **0.87** |
+| 周度 | +14.76% | -17.18% | 0.86 |
+| 日度 | +14.30% | -17.57% | 0.81 |
+
+季度/月度并列最优, 日度因成本略差。**季度再平衡 = 最佳实操**
+（少 75% 交易次数但性能等同月度）。
+
+**Target vol (年化 6-12% 目标)**: 全部恶化 CAGR 到 5-10%。高波动期
+往往是恐慌后的 rebound 期，缩仓错过反弹。**证伪**。
+
+**DD brake (组合回撤 -5% ~ -15% 减半仓)**: 几乎全部恶化（CAGR 2-8%）。
+减半仓后错过底部反弹。**证伪**。
+
+### 最终生产配置建议
+
+```
+持仓: 70% 红利低波 ETF (512890) + 30% 创业板 ETF (159915)
+再平衡: 季度末恢复至 70/30
+交易成本: 约 56bp × 每季度 0-5% 换手 ≈ 年化 0.4%
+期望表现 (9 年回测 basis):
+  CAGR_net: +15.15%
+  MDD: -17.61%
+  Calmar: 0.86
+  Sharpe: 0.74
+```
+
+**总结 (4 条硬规则)**:
+1. **不选股, 选 ETF 组合**。所有 factor 选股组合跑不赢简单 DIV/GEM 二元。
+2. **不择时, 不轮动**。动态规则都被 whipsaw 毁掉。
+3. **不 target vol, 不 DD brake**。主动降仓 = 错过 rebound。
+4. **季度再平衡已足够**。日/周再平衡浪费交易成本, 月/年也可接受。
+
+### 新文件
+
+- `research/factors_v2/overlay_div_lowvol.py` — 实验 3 (证伪)
+- `research/factors_v2/rotate_div_gem.py` — 实验 4 (固定胜轮动)
+- `research/factors_v2/etf_portfolio_sweep.py` — 实验 5 (二元胜多元)
+- `research/factors_v2/quality_lowvol_hybrid.py` — 实验 6 (门槛证伪)
+- `research/factors_v2/portfolio_advanced.py` — 实验 7 (频率/TV/DD brake)
+- `research/factors_v2/output/overlay_div_lowvol.csv`
+- `research/factors_v2/output/rotate_div_gem.csv`
+- `research/factors_v2/output/etf_portfolio_sweep.csv`
+- `research/factors_v2/output/quality_lowvol_hybrid.csv`
+- `research/factors_v2/output/portfolio_advanced.csv`
+
