@@ -139,3 +139,53 @@ panel → _run_one(hold_step=12, liq_other=0.60, risk_cfg)
 - Don't call `_prepare_panel_v5()` repeatedly — cache the result
 - Don't run backtests >10min as Claude Code background tasks — they timeout
 - Don't use one_way_cost<40bp — real A-share costs are ~56bp round-trip
+
+## Backtest QC — MANDATORY before reporting any alpha number
+
+**This project has a repeat failure pattern: backtest initially shows 5-20% alpha, QC reveals it's 0-2%. To break this pattern, any new backtest MUST include ALL of these before any alpha claim:**
+
+### 1. Random control from same universe (STRICT)
+Before comparing signal to any benchmark, build a parallel backtest that:
+- Samples N random stocks from the SAME universe (same liquidity/size filters)
+- Uses SAME date range and hold period
+- Reports its own CAGR/Alpha/Win%
+
+**True Alpha = Signal - Random Control, NOT Signal - HS300.**
+If Signal ≈ Random Control, the "alpha" is just beta to the universe.
+
+### 2. Benchmark must match universe
+- HS300 is ONLY valid benchmark if universe is large-cap (mcap > 500亿)
+- Small/mid-cap strategies: use CSI1000 (000852) or 中证2000, or random control from universe
+- Never use HS300 for a small-cap signal — this single mistake alone inflates alpha ~5pp
+
+### 3. Data coverage audit
+Before running backtest, always compute:
+- Panel股票总数 vs OHLCV 文件覆盖率
+- If OHLCV coverage < 90%, the missing stocks are likely delisted → report separately
+- If signal stocks can't be priced > 10% of time, adjust down estimates
+
+### 4. Period selection disclosure
+- 2017-2024 = small-cap bull cycle, results upward biased
+- Must either include 2015-2017 bear in test, OR explicitly caveat forward expectations
+- Monte Carlo using only bull period returns is NOT a forward forecast
+
+### 5. Cost must be applied in Monte Carlo AND backtest
+- Round-trip 56bp per position
+- Each rebalance = 1.12% drag
+- Applied BEFORE computing median terminal value
+
+### Pre-flight checklist (must execute before showing user any alpha number)
+```
+[ ] Random control from same universe run in parallel?
+[ ] Benchmark matches universe size tier?
+[ ] OHLCV coverage % reported?
+[ ] Period bias disclosed (bull-cycle, bear-cycle)?
+[ ] Costs applied in all return calculations?
+[ ] If all of above pass → then present result.
+    Otherwise: investigate before showing user.
+```
+
+### When user says "this looks too good":
+- Immediately run random control if not done
+- Benchmark mismatch is the #1 culprit, check it first
+- Second most common: survivorship bias in price cache
