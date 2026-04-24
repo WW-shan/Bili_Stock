@@ -165,7 +165,8 @@ def run_screen(max_mcap=200, min_mcap=10, top=20):
         (candidates["pe_ann"]  < 60) &
         (candidates["eps_ann"] > 0) &
         (candidates["ret_12m"].fillna(0) < 3.0) &    # 未超过 300% (避开已暴拉)
-        (candidates["turn20"].fillna(0) > 0.15)
+        (candidates["turn20"].fillna(0) > 0.15) &
+        (candidates["ocf_ps"].fillna(-1) > 0)        # 经营性现金流为正 (排除一次性利润)
     ]
     print(f"    过滤后: {n_before} → {len(candidates)}")
 
@@ -181,7 +182,7 @@ def run_screen(max_mcap=200, min_mcap=10, top=20):
 
     # ── 输出 ──────────────────────────────────────────────────────────────────
     show_cols = ["code","name","industry","reversal_type","quarter","year",
-                 "np_single","np_prev_year","q_yoy","mcap_yi","pe_ann",
+                 "np_single","np_prev_year","q_yoy","ocf_ps","mcap_yi","pe_ann",
                  "ret_3m","ret_12m","turn20","score"]
     out = candidates.sort_values("score", ascending=False)[show_cols]
 
