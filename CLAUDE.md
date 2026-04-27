@@ -140,9 +140,38 @@ panel → _run_one(hold_step=12, liq_other=0.60, risk_cfg)
 - Don't run backtests >10min as Claude Code background tasks — they timeout
 - Don't use one_way_cost<40bp — real A-share costs are ~56bp round-trip
 
-## Backtest QC — MANDATORY before reporting any alpha number
+## Backtest = use research/foundation, no exceptions
 
-**This project has a repeat failure pattern: backtest initially shows 5-20% alpha, QC reveals it's 0-2%. To break this pattern, any new backtest MUST include ALL of these before any alpha claim:**
+**Hard rail (2026-04-27 onwards)**: All new strategies MUST go through `research/foundation/`. Direct scripts that load OHLCV / panel and run their own backtest loops are PROHIBITED. The foundation package enforces:
+1. `DataBundle.load()` runs data audit and raises `DataAuditFailure` if not OK
+2. `Backtest()` constructor requires explicit `random_control: bool` (raises `MissingRandomControl` if missing)
+3. `Benchmark.auto_for(universe)` matches benchmark to universe size tier (raises `BenchmarkMismatch` on mismatch)
+4. `train_test_split` is a required parameter for OOS verification
+5. `CostModel` is required (no zero-cost defaults)
+
+**Standard workflow:**
+```python
+from research.foundation import DataBundle, Universe, CostModel, Backtest, CrossSectionalStrategy
+
+data = DataBundle.load()                                    # Auto-audits
+uni = Universe.small_cap(data, mcap_range=(30, 200))         # Explicit size tier
+strat = CrossSectionalStrategy(name="my_factor", factor_fn=my_fn, top_pct=0.20, hold_days=180)
+bt = Backtest(strategy=strat, universe=uni,
+              cost_model=CostModel.a_share_retail_quarterly(),
+              random_control=True,                            # MUST be explicit
+              train_test_split=("2010-01-01", "2018-06-30"),  # OOS enforced
+              n_random_repeats=30)
+result = bt.run()
+StandardReport.from_result(result).print()
+```
+
+**For event-driven strategies (limit-up, news, earnings)**: Use `EventDrivenStrategy` and pass to `Backtest`. The framework auto-generates same-stock random-day baselines.
+
+**Self-test**: Run `python research/foundation/self_test.py` after any framework change. NULL/RANDOM factors must give |alpha| < 1% and |t| < 2; if not, framework has bugs.
+
+## Backtest QC — historical context (now enforced by foundation)
+
+**This project had a repeat failure pattern: backtest initially shows 5-20% alpha, QC reveals it's 0-2%. The foundation package above ENFORCES the rules below. They are kept here for historical understanding:**
 
 ### 1. Random control from same universe (STRICT)
 Before comparing signal to any benchmark, build a parallel backtest that:

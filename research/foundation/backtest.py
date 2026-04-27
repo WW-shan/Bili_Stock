@@ -1,0 +1,347 @@
+"""
+Backtest — 强制 random control 的统一回测引擎
+================================================
+**设计意图**: random_control 是必填参数, 没传直接报错. 这是项目反复犯错的根因.
+
+API 示例:
+    bt = Backtest(
+        strategy=my_strategy,
+        universe=uni,
+        cost_model=CostModel.a_share_retail_quarterly(),
+        random_control=True,                        # 必填!
+        train_test_split=("2010-01-01", "2018-06-30"),  # OOS 必填
+        n_random_repeats=30,
+        seed=42,
+    )
+    result = bt.run()
+    result.report.print()
+"""
+import warnings
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Dict
+
+import numpy as np
+import pandas as pd
+
+from .data import DataBundle, REPORT_DELAY_DAYS
+from .universe import Universe
+from .strategies import Strategy, CrossSectionalStrategy, EventDrivenStrategy
+from .costs import CostModel
+from .exceptions import MissingRandomControl, InsufficientData
+
+
+REQUIRED_RANDOM_CONTROL_DOC = """
+random_control 必须显式指定 (True 或 False).
+
+True 表示自动生成同宇宙随机对照组 (推荐).
+False 表示明确放弃对照 (仅用于诊断, 不可作生产策略).
+
+如果你不知道选哪个, 选 True. 这条规则源自项目历史:
+反转信号曾经因为没跑 random control, alpha 虚高 +5pp 被识别.
+""".strip()
+
+
+@dataclass
+class PeriodResult:
+    """单个回测期的结果"""
+    period_label: str               # '2017Q1' 或 'event_2017-03-15'
+    signal_date: pd.Timestamp
+    fwd_date: pd.Timestamp
+    universe_size: int
+    signal_picks: List[str]
+    signal_ret_gross: float
+    signal_ret_net: float
+    random_ret_gross: Optional[float]   # None 如 random_control=False
+    random_ret_net: Optional[float]
+    alpha_gross: Optional[float]
+    alpha_net: Optional[float]
+
+
+@dataclass
+class BacktestResult:
+    """回测全部结果"""
+    strategy_name: str
+    universe_desc: str
+    cost_desc: str
+    n_periods: int
+    train_test_split: Optional[Tuple[str, str]]
+
+    train_periods: List[PeriodResult]
+    test_periods: List[PeriodResult]
+
+    # 在 finalize() 时填充
+    train_summary: Dict = field(default_factory=dict)
+    test_summary: Dict = field(default_factory=dict)
+    full_summary: Dict = field(default_factory=dict)
+
+
+# ── Backtest 引擎 ────────────────────────────────────────────────────────────
+class Backtest:
+    """
+    Args:
+        strategy: Strategy 实例
+        universe: Universe 实例 (含 DataBundle)
+        cost_model: CostModel 实例
+        random_control: True 强制内置随机对照, False 明确放弃 (须给 reason)
+        random_control_reason: 当 random_control=False 时, 必须给理由 (留痕)
+        train_test_split: (train_end, test_start) 元组. 强制 OOS 拆分.
+        n_random_repeats: random control 重抽次数 (用于均值降噪)
+        year_start, year_end: 回测年份范围
+        seed: 随机种子
+    """
+    def __init__(self,
+                 strategy: Strategy,
+                 universe: Universe,
+                 cost_model: CostModel,
+                 random_control,                         # bool, 必填
+                 random_control_reason: Optional[str] = None,
+                 train_test_split: Optional[Tuple[str, str]] = None,
+                 n_random_repeats: int = 30,
+                 year_start: int = 2017,
+                 year_end: int = 2025,
+                 seed: int = 42):
+        # 强制 random_control 显式
+        if not isinstance(random_control, bool):
+            raise MissingRandomControl(REQUIRED_RANDOM_CONTROL_DOC)
+        if random_control is False and not random_control_reason:
+            raise MissingRandomControl(
+                "选择 random_control=False 必须提供 random_control_reason. " +
+                REQUIRED_RANDOM_CONTROL_DOC
+            )
+
+        self.strategy = strategy
+        self.universe = universe
+        self.cost_model = cost_model
+        self.random_control = random_control
+        self.random_control_reason = random_control_reason
+        self.train_test_split = train_test_split
+        self.n_random_repeats = n_random_repeats
+        self.year_start = year_start
+        self.year_end = year_end
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+
+    def run(self, verbose: bool = True) -> BacktestResult:
+        """主回测流程"""
+        if verbose:
+            self._print_header()
+
+        if self.strategy.kind() == "cross_sectional":
+            results = self._run_cross_sectional(verbose=verbose)
+        else:
+            results = self._run_event_driven(verbose=verbose)
+
+        # 拆 train/test
+        train, test = self._split_train_test(results)
+
+        backtest_result = BacktestResult(
+            strategy_name=self.strategy.name,
+            universe_desc=self.universe.describe(),
+            cost_desc=self.cost_model.describe(),
+            n_periods=len(results),
+            train_test_split=self.train_test_split,
+            train_periods=train,
+            test_periods=test,
+        )
+        self._finalize(backtest_result)
+        return backtest_result
+
+    def _print_header(self):
+        print("=" * 80)
+        print(f"  Backtest: {self.strategy.name}")
+        print("=" * 80)
+        print(f"  策略类型: {self.strategy.kind()}")
+        print(f"  宇宙:    {self.universe.describe()}")
+        print(f"  成本:    {self.cost_model.describe()}")
+        print(f"  Random control: {self.random_control}", end="")
+        if not self.random_control:
+            print(f"  (理由: {self.random_control_reason})")
+        else:
+            print(f"  ({self.n_random_repeats} 次重抽)")
+        if self.train_test_split:
+            print(f"  Train/Test: <= {self.train_test_split[0]} / >= {self.train_test_split[1]}")
+        print()
+
+    # ── Cross-sectional 回测 ──────────────────────────────────────────────────
+    def _run_cross_sectional(self, verbose: bool) -> List[PeriodResult]:
+        s: CrossSectionalStrategy = self.strategy
+        results = []
+        # 季度信号日
+        Q_MONTH = [3, 6, 9, 12]; Q_DAY = [31, 30, 30, 31]
+        for yr in range(self.year_start, self.year_end):
+            for q in [1, 2, 3, 4]:
+                rpt_date = pd.Timestamp(yr, Q_MONTH[q-1], Q_DAY[q-1])
+                sig_date = self.universe.data.get_signal_date(rpt_date)
+                fwd_date = sig_date + pd.Timedelta(days=s.hold_days)
+
+                universe_df = self.universe.at(rpt_date, sig_date)
+                if len(universe_df) < 50: continue
+
+                # 信号组
+                picks = s.select(universe_df, self.universe.data.price_cache, sig_date)
+                if not picks: continue
+                sig_ret = self._portfolio_fwd_ret(picks, sig_date, fwd_date)
+                if np.isnan(sig_ret): continue
+
+                # Random control (重抽多次取均值)
+                rand_ret = None
+                if self.random_control:
+                    rand_returns = []
+                    for i in range(self.n_random_repeats):
+                        rng = np.random.default_rng(self.seed + yr*4 + q + i*100)
+                        n_picks = min(len(picks), len(universe_df))
+                        rand_codes = rng.choice(universe_df["code"].values,
+                                                 size=n_picks, replace=False).tolist()
+                        rr = self._portfolio_fwd_ret(rand_codes, sig_date, fwd_date)
+                        if not np.isnan(rr): rand_returns.append(rr)
+                    rand_ret = float(np.mean(rand_returns)) if rand_returns else None
+
+                cost = self.cost_model.total_round_trip
+                pr = PeriodResult(
+                    period_label=f"{yr}Q{q}",
+                    signal_date=sig_date,
+                    fwd_date=fwd_date,
+                    universe_size=len(universe_df),
+                    signal_picks=picks,
+                    signal_ret_gross=sig_ret,
+                    signal_ret_net=sig_ret - cost,
+                    random_ret_gross=rand_ret,
+                    random_ret_net=(rand_ret - cost) if rand_ret is not None else None,
+                    alpha_gross=(sig_ret - rand_ret) if rand_ret is not None else None,
+                    alpha_net=(sig_ret - rand_ret) if rand_ret is not None else None,
+                )
+                results.append(pr)
+                if verbose:
+                    a = f" α={pr.alpha_gross*100:+.2f}%" if pr.alpha_gross is not None else ""
+                    print(f"  {pr.period_label}  uni={len(universe_df):>4}  "
+                          f"picks={len(picks):>3}  sig={sig_ret*100:>+5.2f}%{a}")
+        return results
+
+    # ── Event-driven 回测 ─────────────────────────────────────────────────────
+    def _run_event_driven(self, verbose: bool) -> List[PeriodResult]:
+        s: EventDrivenStrategy = self.strategy
+        events_dict = s.detect_events(self.universe.data.price_cache)
+        if verbose:
+            print(f"  检测到事件: {sum(len(v) for v in events_dict.values())} 个")
+
+        # 每个事件 → 1 个 PeriodResult (短线特殊)
+        results = []
+        cost = self.cost_model.total_round_trip
+        for code, idx_list in events_dict.items():
+            df = self.universe.data.price_cache.get(code)
+            if df is None: continue
+            for idx in idx_list:
+                # entry
+                if s.entry_at == "today_close":
+                    if idx >= len(df): continue
+                    entry = df.iloc[idx]["close"]
+                    entry_date = df.iloc[idx]["date"]
+                    t_off = 0
+                elif s.entry_at == "next_open":
+                    if idx + 1 >= len(df): continue
+                    entry = df.iloc[idx + 1].get("open", df.iloc[idx + 1]["close"])
+                    entry_date = df.iloc[idx + 1]["date"]
+                    t_off = 1
+                else:
+                    continue
+                # exit
+                exit_idx = idx + t_off + s.hold_days
+                if exit_idx >= len(df): continue
+                if s.exit_at == "next_close":
+                    exit_p = df.iloc[exit_idx]["close"]
+                elif s.exit_at == "next_open":
+                    exit_p = df.iloc[exit_idx].get("open", df.iloc[exit_idx]["close"])
+                else:
+                    exit_p = df.iloc[exit_idx]["close"]
+                gross = exit_p / entry - 1
+
+                # Random baseline: 同股+随机非事件日 (排除事件 ±10日)
+                rand_ret = None
+                if self.random_control:
+                    rand_ret = self._event_random_baseline(code, idx_list, df, s, idx)
+
+                pr = PeriodResult(
+                    period_label=f"event_{code}_{entry_date.strftime('%Y%m%d')}",
+                    signal_date=entry_date,
+                    fwd_date=df.iloc[exit_idx]["date"],
+                    universe_size=1,
+                    signal_picks=[code],
+                    signal_ret_gross=gross,
+                    signal_ret_net=gross - cost,
+                    random_ret_gross=rand_ret,
+                    random_ret_net=(rand_ret - cost) if rand_ret is not None else None,
+                    alpha_gross=(gross - rand_ret) if rand_ret is not None else None,
+                    alpha_net=(gross - rand_ret) if rand_ret is not None else None,
+                )
+                results.append(pr)
+        return results
+
+    def _event_random_baseline(self, code, event_idxs, df, strategy, current_idx,
+                                exclude_window=10) -> Optional[float]:
+        n = len(df)
+        excluded = set()
+        for ei in event_idxs:
+            for o in range(-exclude_window, exclude_window + 1):
+                excluded.add(ei + o)
+        candidates = [i for i in range(20, n - strategy.hold_days - 2) if i not in excluded]
+        if len(candidates) < self.n_random_repeats: return None
+        rng = np.random.default_rng(self.seed + current_idx)
+        picks = rng.choice(candidates, size=self.n_random_repeats, replace=False)
+        rets = []
+        for idx in picks:
+            t_off = 1 if strategy.entry_at == "next_open" else 0
+            entry = (df.iloc[idx + 1].get("open", df.iloc[idx + 1]["close"])
+                      if t_off == 1 else df.iloc[idx]["close"])
+            exit_idx = idx + t_off + strategy.hold_days
+            if exit_idx >= n: continue
+            exit_p = df.iloc[exit_idx]["close"]
+            if entry > 0:
+                rets.append(exit_p / entry - 1)
+        return float(np.mean(rets)) if rets else None
+
+    # ── 工具: 投资组合前向收益 (等权) ──────────────────────────────────────
+    def _portfolio_fwd_ret(self, codes: List[str],
+                            start_date: pd.Timestamp,
+                            end_date: pd.Timestamp) -> float:
+        rets = []
+        for c in codes:
+            ep = self.universe.data.get_price_at(c, start_date)
+            xp = self.universe.data.get_price_at(c, end_date)
+            if ep and xp and ep > 0:
+                rets.append(xp / ep - 1)
+        return float(np.mean(rets)) if rets else float("nan")
+
+    # ── Train/Test 拆分 ───────────────────────────────────────────────────────
+    def _split_train_test(self, results: List[PeriodResult]) -> Tuple[List, List]:
+        if not self.train_test_split:
+            return results, []
+        train_end = pd.Timestamp(self.train_test_split[0])
+        test_start = pd.Timestamp(self.train_test_split[1])
+        train = [r for r in results if r.signal_date <= train_end]
+        test  = [r for r in results if r.signal_date >= test_start]
+        return train, test
+
+    # ── Summary stats ─────────────────────────────────────────────────────────
+    def _finalize(self, br: BacktestResult):
+        for label, periods, target in [
+            ("train", br.train_periods, br.train_summary),
+            ("test",  br.test_periods,  br.test_summary),
+            ("full",  br.train_periods + br.test_periods, br.full_summary),
+        ]:
+            if not periods: continue
+            sig_gross = np.array([p.signal_ret_gross for p in periods])
+            sig_net   = np.array([p.signal_ret_net for p in periods])
+            target["n"] = len(periods)
+            target["signal_mean_gross"] = float(sig_gross.mean())
+            target["signal_mean_net"] = float(sig_net.mean())
+            target["signal_win_pct"] = float((sig_gross > 0).mean() * 100)
+
+            if self.random_control:
+                rand_gross = np.array([p.random_ret_gross for p in periods if p.random_ret_gross is not None])
+                alpha = np.array([p.alpha_gross for p in periods if p.alpha_gross is not None])
+                if len(alpha) > 0:
+                    target["random_mean_gross"] = float(rand_gross.mean())
+                    target["alpha_mean"] = float(alpha.mean())
+                    target["alpha_std"] = float(alpha.std(ddof=1))
+                    target["t_stat"] = float(alpha.mean() / (alpha.std(ddof=1) / np.sqrt(len(alpha))))
+                    target["alpha_win_pct"] = float((alpha > 0).mean() * 100)
