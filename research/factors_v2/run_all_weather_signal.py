@@ -1,16 +1,19 @@
 """
-全天候 30/30/40 + T2 双动量 overlay — 实盘信号
-======================================================
+全天候 30/30/40 实盘信号 (默认静态, T2 动量 overlay 可选)
+==========================================================
 基础组合: 30% 股 (DIV70/GEM30) + 30% 债 + 40% 金, 季度再平衡
 
-T2 overlay 规则 (月度检查, 季度末调仓):
+**2026-04-28 重要变更**: 默认行为改为静态 30/30/40, T2 双动量 overlay 改为 --t2 可选.
+原因: T2 alpha 解构发现 momentum 在 2018-2026 OOS 段转负 (Calmar -0.18 vs Static).
+    - 2020-04 V 型反弹时 STK OFF 错过 +29.6% 季度回报
+    - Train 段 alpha 主要由 2015 股灾贡献, 该 regime 后市场结构改变
+    - 静态 vs T2: CAGR 8.11% vs 8.59% (-0.48pp), MDD -19.4% vs -17.4% (+2pp)
+    - 操作简化: 无需算 SMA200 / 12M momentum, 季末固定权重再平衡即可
+详见: research/factors_v2/output/all_weather_alpha_decomp.md
+
+T2 动量规则 (月度检查, 季度末调仓, --t2 启用):
   - STK 过去 12M 收益 < 0 OR STK < SMA200 → 股腿权重转 BOND
   - GOLD 过去 12M 收益 < 0 → 金腿权重转 BOND
-
-16 年回测 (2010-06 → 2026-04):
-  - CAGR 8.17% / MDD -15.8% / Calmar 0.52 / Sharpe 0.82
-  - 3Y 滚动不亏率 98.1% / 3Y 最坏 CAGR -2.80%
-  - 2015 股灾 -12.6%, 2018 贸易战 +1.1%, 2022-23 熊市 +8.6%
 
 ETF 标的 (默认, 可改):
   DIV  = 512890 红利低波
@@ -19,7 +22,8 @@ ETF 标的 (默认, 可改):
   GOLD = 518880 黄金 ETF
 
 用法:
-  python research/factors_v2/run_all_weather_signal.py               # 今日诊断
+  python research/factors_v2/run_all_weather_signal.py               # 今日诊断 (静态默认)
+  python research/factors_v2/run_all_weather_signal.py --t2          # 启用 T2 动量 overlay
   python research/factors_v2/run_all_weather_signal.py --push        # 推钉钉
   python research/factors_v2/run_all_weather_signal.py --capital 200000
   python research/factors_v2/run_all_weather_signal.py --force       # 非季度末强制出调仓
@@ -79,12 +83,13 @@ DEFAULT_CAPITAL = 100_000
 
 # ── 信号计算 ──────────────────────────────────────────────────────────── #
 
-def compute_t2_signal() -> dict:
+def compute_signal(use_t2: bool = False) -> dict:
     """
-    用 long_history_4asset.csv 计算最新信号状态:
-      - STK 12M 收益 / SMA200 位置
-      - GOLD 12M 收益
-    返回 {"stk_on": bool, "gold_on": bool, "weights": {...}, "diag": {...}}
+    计算最新信号状态.
+    use_t2=False (默认): 静态 30/30/40, 直接返回 W_BASE
+    use_t2=True: T2 双动量 overlay (12M 收益 + SMA200), 信号失效切 BOND
+
+    返回 {"stk_on": bool, "gold_on": bool, "weights": {...}, "mode": str, "diag": {...}}
     """
     if not os.path.exists(LONG_HIST):
         raise FileNotFoundError(f"{LONG_HIST} 不存在, 请先跑 fetch_long_history.py + fetch_bond_gold.py")
@@ -99,29 +104,40 @@ def compute_t2_signal() -> dict:
     df["GOLD_ret12m"] = df["GOLD"].pct_change(252)
 
     last = df.iloc[-1]
-    stk_mom_ok = (not pd.isna(last["STK_ret12m"])) and last["STK_ret12m"] > 0
-    stk_sma_ok = last["STK"] > last["STK_sma200"]
-    stk_on = stk_mom_ok and stk_sma_ok
-    gold_mom_ok = (not pd.isna(last["GOLD_ret12m"])) and last["GOLD_ret12m"] > 0
+    stk_ret12m = float(last["STK_ret12m"]) if not pd.isna(last["STK_ret12m"]) else None
+    gold_ret12m = float(last["GOLD_ret12m"]) if not pd.isna(last["GOLD_ret12m"]) else None
+    stk_sma_ok = bool(last["STK"] > last["STK_sma200"])
 
-    # 目标权重
+    diag = {
+        "latest_date": str(last["date"].date()),
+        "stk_ret12m": stk_ret12m,
+        "stk_above_sma200": stk_sma_ok,
+        "gold_ret12m": gold_ret12m,
+    }
+
+    if not use_t2:
+        # 静态 30/30/40 (生产默认), 不读动量, 永远 ON
+        return {"stk_on": True, "gold_on": True, "weights": dict(W_BASE),
+                "mode": "static", "diag": diag}
+
+    # T2 双动量 overlay (--t2 启用)
+    stk_mom_ok = stk_ret12m is not None and stk_ret12m > 0
+    stk_on = stk_mom_ok and stk_sma_ok
+    gold_on = gold_ret12m is not None and gold_ret12m > 0
+
     w = dict(W_BASE)
     if not stk_on:
         w["BOND"] += w["STK"]; w["STK"] = 0.0
-    if not gold_mom_ok:
+    if not gold_on:
         w["BOND"] += w["GOLD"]; w["GOLD"] = 0.0
 
-    return {
-        "stk_on": stk_on,
-        "gold_on": gold_mom_ok,
-        "weights": w,
-        "diag": {
-            "latest_date": str(last["date"].date()),
-            "stk_ret12m": float(last["STK_ret12m"]) if not pd.isna(last["STK_ret12m"]) else None,
-            "stk_above_sma200": bool(stk_sma_ok),
-            "gold_ret12m": float(last["GOLD_ret12m"]) if not pd.isna(last["GOLD_ret12m"]) else None,
-        }
-    }
+    return {"stk_on": stk_on, "gold_on": gold_on, "weights": w,
+            "mode": "t2", "diag": diag}
+
+
+# 向后兼容: 保留旧名 (内部调度可能引用)
+def compute_t2_signal() -> dict:
+    return compute_signal(use_t2=True)
 
 
 # ── 价格获取 ──────────────────────────────────────────────────────────── #
@@ -247,28 +263,43 @@ def ding_sign(webhook: str, secret: str) -> str:
 
 def build_markdown(today: str, sig: dict, rebal: dict, capital: float,
                    prices: dict, price_dates: dict, is_rebal_day: bool, reason: str) -> tuple[str, str]:
+    is_t2 = sig.get("mode") == "t2"
+    mode_tag = "T2 动量" if is_t2 else "静态"
     title = f"全天候调仓 {today} 葵花宝典" if is_rebal_day else f"全天候诊断 {today} 葵花宝典"
-    lines = [f"## 全天候 30/30/40 + T2 动量 — {today}\n"]
-    lines.append(f"**策略**: 30% 股 (DIV70/GEM30) + 30% 债 + 40% 金, 季度再平衡, T2 动量 overlay")
-    lines.append(f"**回测 (16 年)**: CAGR 8.17% / MDD -15.8% / Calmar 0.52 / Sharpe 0.82 / 3Y 不亏率 98.1%\n")
+    lines = [f"## 全天候 30/30/40 ({mode_tag}) — {today}\n"]
+    if is_t2:
+        lines.append(f"**策略**: 30% 股 (DIV70/GEM30) + 30% 债 + 40% 金, 季度再平衡, **T2 动量 overlay (--t2)**")
+        lines.append(f"**T2 回测**: Full CAGR 8.59% / MDD -17.4% / Calmar 0.49 — Train +0.18 alpha, **Test OOS -0.18 alpha**")
+    else:
+        lines.append(f"**策略**: 30% 股 (DIV70/GEM30) + 30% 债 + 40% 金, **季度再平衡** (静态默认)")
+        lines.append(f"**Static 回测**: Full CAGR 8.11% / MDD -19.4% / Calmar 0.42 — OOS Test Calmar 1.13 优于 T2 0.96")
 
-    # 信号状态
-    lines.append(f"### 📡 动量信号 (基于 {sig['diag']['latest_date']} 数据)")
-    stk_icon = "🟢" if sig["stk_on"] else "🔴"
-    gold_icon = "🟢" if sig["gold_on"] else "🔴"
-    s12 = sig["diag"]["stk_ret12m"]
-    g12 = sig["diag"]["gold_ret12m"]
-    lines.append(f"- {stk_icon} 股腿: 12M 收益 {f'{s12*100:+.1f}%' if s12 is not None else 'N/A'}, "
-                 f"{'在' if sig['diag']['stk_above_sma200'] else '跌破'} SMA200")
-    lines.append(f"- {gold_icon} 金腿: 12M 收益 {f'{g12*100:+.1f}%' if g12 is not None else 'N/A'}\n")
+    # 信号 / 诊断
+    if is_t2:
+        lines.append(f"\n### 📡 动量信号 (基于 {sig['diag']['latest_date']} 数据)")
+        stk_icon = "🟢" if sig["stk_on"] else "🔴"
+        gold_icon = "🟢" if sig["gold_on"] else "🔴"
+        s12 = sig["diag"]["stk_ret12m"]
+        g12 = sig["diag"]["gold_ret12m"]
+        lines.append(f"- {stk_icon} 股腿: 12M 收益 {f'{s12*100:+.1f}%' if s12 is not None else 'N/A'}, "
+                     f"{'在' if sig['diag']['stk_above_sma200'] else '跌破'} SMA200")
+        lines.append(f"- {gold_icon} 金腿: 12M 收益 {f'{g12*100:+.1f}%' if g12 is not None else 'N/A'}\n")
+    else:
+        lines.append(f"\n### 📋 静态模式 (无动量判断, 永远 ON)")
+        s12 = sig["diag"]["stk_ret12m"]
+        g12 = sig["diag"]["gold_ret12m"]
+        lines.append(f"- 参考: 股 12M {f'{s12*100:+.1f}%' if s12 is not None else 'N/A'}  "
+                     f"金 12M {f'{g12*100:+.1f}%' if g12 is not None else 'N/A'}  (仅诊断, 不影响权重)\n")
 
     w = sig["weights"]
     lines.append(f"### 目标权重")
     lines.append(f"| 资产 | 基础 | 当前目标 |")
     lines.append(f"|---|---|---|")
-    lines.append(f"| 股 (DIV/GEM 7:3) | 30% | **{w['STK']*100:.0f}%** {'(动量OFF → 转债)' if w['STK']==0 else ''} |")
+    stk_note = "(动量OFF → 转债)" if (is_t2 and w['STK'] == 0) else ""
+    gold_note = "(动量OFF → 转债)" if (is_t2 and w['GOLD'] == 0) else ""
+    lines.append(f"| 股 (DIV/GEM 7:3) | 30% | **{w['STK']*100:.0f}%** {stk_note} |")
     lines.append(f"| 债 | 30% | **{w['BOND']*100:.0f}%** |")
-    lines.append(f"| 金 | 40% | **{w['GOLD']*100:.0f}%** {'(动量OFF → 转债)' if w['GOLD']==0 else ''} |\n")
+    lines.append(f"| 金 | 40% | **{w['GOLD']*100:.0f}%** {gold_note} |\n")
 
     if is_rebal_day:
         lines.append(f"### ⚡ 今日调仓: {reason}\n")
@@ -347,6 +378,8 @@ def main():
     ap.add_argument("--push", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--capital", type=float, default=None)
+    ap.add_argument("--t2", action="store_true",
+                    help="启用 T2 双动量 overlay (默认静态 30/30/40, 因 T2 OOS Calmar 低 0.18)")
     ap.add_argument("--confirm-rebalance", action="store_true",
                     help="确认已下单后更新 state 文件")
     args = ap.parse_args()
@@ -361,8 +394,9 @@ def main():
     print(f"[+] 本金: ¥{capital:,.0f}")
 
     # 信号
-    print(f"[+] 计算 T2 动量信号...")
-    sig = compute_t2_signal()
+    mode = "T2 双动量" if args.t2 else "静态 30/30/40"
+    print(f"[+] 计算信号 ({mode})...")
+    sig = compute_signal(use_t2=args.t2)
     print(f"  STK: {'ON' if sig['stk_on'] else 'OFF'}, GOLD: {'ON' if sig['gold_on'] else 'OFF'}")
     print(f"  目标权重: STK={sig['weights']['STK']*100:.0f}% / BOND={sig['weights']['BOND']*100:.0f}% / "
           f"GOLD={sig['weights']['GOLD']*100:.0f}%")
