@@ -85,7 +85,11 @@ class Backtest:
         random_control: True 强制内置随机对照, False 明确放弃 (须给 reason)
         random_control_reason: 当 random_control=False 时, 必须给理由 (留痕)
         train_test_split: (train_end, test_start) 元组. 强制 OOS 拆分.
-        n_random_repeats: random control 重抽次数 (用于均值降噪)
+        n_random_repeats: 每期 random control 重抽次数. 默认 1.
+            **重要**: >1 会把 random 噪音平均掉, 系统性抬高 t-stat (alpha 方差只剩
+            signal 一侧). 1 = 单次抽样, alpha_i = sig_i - rand_i 带完整噪音, t-stat
+            真实. 如果想做稳健性检查, 请用不同 seed 跑多次完整 backtest 取均值, 而
+            不是把 n_random_repeats 调高.
         year_start, year_end: 回测年份范围
         seed: 随机种子
     """
@@ -96,7 +100,7 @@ class Backtest:
                  random_control,                         # bool, 必填
                  random_control_reason: Optional[str] = None,
                  train_test_split: Optional[Tuple[str, str]] = None,
-                 n_random_repeats: int = 30,
+                 n_random_repeats: int = 1,
                  year_start: int = 2017,
                  year_end: int = 2025,
                  seed: int = 42):
@@ -183,14 +187,18 @@ class Backtest:
                 sig_ret = self._portfolio_fwd_ret(picks, sig_date, fwd_date)
                 if np.isnan(sig_ret): continue
 
-                # Random control (重抽多次取均值)
+                # Random control
+                # B2: n_random_repeats=1 (默认) → 单次抽样, alpha 带真实噪音, t-stat 不被夸大
+                # B4: 从 universe 里排除 picks 后再抽 (避免 random 与 signal 重叠)
                 rand_ret = None
                 if self.random_control:
+                    pool = universe_df[~universe_df["code"].isin(picks)]
                     rand_returns = []
                     for i in range(self.n_random_repeats):
                         rng = np.random.default_rng(self.seed + yr*4 + q + i*100)
-                        n_picks = min(len(picks), len(universe_df))
-                        rand_codes = rng.choice(universe_df["code"].values,
+                        n_picks = min(len(picks), len(pool))
+                        if n_picks <= 0: break
+                        rand_codes = rng.choice(pool["code"].values,
                                                  size=n_picks, replace=False).tolist()
                         rr = self._portfolio_fwd_ret(rand_codes, sig_date, fwd_date)
                         if not np.isnan(rr): rand_returns.append(rr)
@@ -244,8 +252,11 @@ class Backtest:
                     t_off = 1
                 else:
                     continue
-                # exit
-                exit_idx = idx + t_off + s.hold_days
+                # exit at close of (idx + hold_days). 与 legacy limit_up_strategies.py 一致:
+                #   entry=today_close, hold=1: 信号日尾盘抢板, 次日 close 卖 → 1 夜.
+                #   entry=next_open,   hold=1: 次日开盘买, 次日 close 卖 → 当日 day-trade.
+                # 两条都是 idx + hold_days 的 close.
+                exit_idx = idx + s.hold_days
                 if exit_idx >= len(df): continue
                 if s.exit_at == "next_close":
                     exit_p = df.iloc[exit_idx]["close"]
@@ -277,22 +288,28 @@ class Backtest:
         return results
 
     def _event_random_baseline(self, code, event_idxs, df, strategy, current_idx,
-                                exclude_window=10) -> Optional[float]:
+                                exclude_window=10,
+                                same_regime_window=90) -> Optional[float]:
+        """B3 修复: candidates 限制在 ±same_regime_window 个交易日内, 控制市场环境差异."""
         n = len(df)
         excluded = set()
         for ei in event_idxs:
             for o in range(-exclude_window, exclude_window + 1):
                 excluded.add(ei + o)
-        candidates = [i for i in range(20, n - strategy.hold_days - 2) if i not in excluded]
-        if len(candidates) < self.n_random_repeats: return None
+        lo = max(20, current_idx - same_regime_window)
+        hi = min(n - strategy.hold_days - 2, current_idx + same_regime_window)
+        candidates = [i for i in range(lo, hi) if i not in excluded]
+        if len(candidates) < max(self.n_random_repeats, 5): return None
         rng = np.random.default_rng(self.seed + current_idx)
-        picks = rng.choice(candidates, size=self.n_random_repeats, replace=False)
+        # n_random_repeats=1 → 单次抽样 (alpha 带完整噪音, t-stat 真实)
+        sample_size = min(self.n_random_repeats, len(candidates))
+        picks = rng.choice(candidates, size=sample_size, replace=False)
         rets = []
         for idx in picks:
             t_off = 1 if strategy.entry_at == "next_open" else 0
             entry = (df.iloc[idx + 1].get("open", df.iloc[idx + 1]["close"])
                       if t_off == 1 else df.iloc[idx]["close"])
-            exit_idx = idx + t_off + strategy.hold_days
+            exit_idx = idx + strategy.hold_days   # B1 修复: 与主路径一致
             if exit_idx >= n: continue
             exit_p = df.iloc[exit_idx]["close"]
             if entry > 0:
@@ -339,9 +356,10 @@ class Backtest:
             if self.random_control:
                 rand_gross = np.array([p.random_ret_gross for p in periods if p.random_ret_gross is not None])
                 alpha = np.array([p.alpha_gross for p in periods if p.alpha_gross is not None])
-                if len(alpha) > 0:
+                if len(alpha) >= 2:
                     target["random_mean_gross"] = float(rand_gross.mean())
                     target["alpha_mean"] = float(alpha.mean())
                     target["alpha_std"] = float(alpha.std(ddof=1))
-                    target["t_stat"] = float(alpha.mean() / (alpha.std(ddof=1) / np.sqrt(len(alpha))))
+                    se = alpha.std(ddof=1) / np.sqrt(len(alpha))
+                    target["t_stat"] = float(alpha.mean() / se) if se > 0 else float("nan")
                     target["alpha_win_pct"] = float((alpha > 0).mean() * 100)

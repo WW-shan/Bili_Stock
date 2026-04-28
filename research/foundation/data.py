@@ -165,7 +165,9 @@ class DataBundle:
                 lc = next((c for c in ["low","最低"] if c in df.columns), None)
                 pc = next((c for c in ["pctChg","涨跌幅"] if c in df.columns), None)
                 tc = next((c for c in ["turn","换手率"] if c in df.columns), None)
-                # 必需: 日期 + 收盘. pct/open/high/low/turn 可选.
+                vc = next((c for c in ["volume","成交量"] if c in df.columns), None)
+                ac = next((c for c in ["amount","成交额"] if c in df.columns), None)
+                # 必需: 日期 + 收盘. 其余可选.
                 if not (dc and cc): continue
                 df[dc] = pd.to_datetime(df[dc], errors="coerce")
                 df = df.dropna(subset=[dc, cc]).sort_values(dc).reset_index(drop=True)
@@ -175,11 +177,13 @@ class DataBundle:
                 if lc: renames[lc] = "low"
                 if pc: renames[pc] = "pct"
                 if tc: renames[tc] = "turn"
+                if vc: renames[vc] = "vol"
+                if ac: renames[ac] = "amount"
                 df = df.rename(columns=renames)
                 # 如果缺 pct, 从 close 推 (假设已经前复权, 这是 baostock 默认)
                 if "pct" not in df.columns:
                     df["pct"] = (df["close"] / df["close"].shift(1) - 1) * 100
-                keep = [c for c in ["date","close","open","high","low","pct","turn"] if c in df.columns]
+                keep = [c for c in ["date","close","open","high","low","pct","turn","vol","amount"] if c in df.columns]
                 cache[code] = df[keep]
             except Exception:
                 continue
