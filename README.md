@@ -1,58 +1,58 @@
-# Bili_Stock — An Honest A-Share Quant Case Study
+# Bili_Stock — A 股量化诚实复盘
 
-A 9-month build (2025-08 → 2026-04) of a quantitative system on the Chinese A-share market. The journey: Bilibili stock-tip uploaders (cumulative −91.85%) → Xueqiu retail-consensus signal (audited down to ~2% net) → factor research (12 factors, all `t<2`) → first-board / 一进二 event strategies (systematically falsified) → **finally settled on a static 30/30/40 all-weather ETF portfolio with no timing and no stock picking**.
+历时 9 个月 (2025-08 → 2026-04) 在中国 A 股市场搭建的量化系统。一路走来: B 站荐股博主 (累计 −91.85%) → 雪球散户共识信号 (审计后跌到 ~2% 净) → 因子研究 (12 因子全部 `t<2`) → 一进二/打板事件战法 (系统证伪) → **最终落到一个静态 30/30/40 全天候 ETF 组合, 不择时不选股**。
 
-**The strategies do not make money on top of the market. The infrastructure, the audit framework, and the post-mortems do.** Six categories of strategy were systematically falsified before settling on the simplest possible answer.
+**这些策略本身不赚超额, 真正有价值的是基础设施、审计框架、和复盘文档。** 在settle 到最简单的答案之前, 6 类策略被系统证伪。
 
-> 🇨🇳 中文长文反思: [`docs/quant_strategy_lessons.md`](docs/quant_strategy_lessons.md). 这是这个项目最重要的产出, 比代码更值得读.
+> 🇨🇳 中文长文反思 (最重要的产出, 比代码值得读): [`docs/quant_strategy_lessons.md`](docs/quant_strategy_lessons.md)
 
 ---
 
-## What is the current production?
+## 当前生产策略
 
-**Static 30/30/40 all-weather ETF portfolio, quarterly rebalance.**
+**静态 30/30/40 全天候 ETF 组合, 季度再平衡**.
 
-| Asset | Weight | ETF |
+| 资产 | 权重 | ETF |
 |---|---:|---|
-| Equity (70% Dividend-LowVol + 30% ChiNext) | 30% | 512890 / 159915 |
-| Bond (5Y treasury) | 30% | 511010 |
-| Gold | 40% | 518880 |
+| 股票 (70% 红利低波 + 30% 创业板) | 30% | 512890 / 159915 |
+| 国债 (5 年期) | 30% | 511010 |
+| 黄金 | 40% | 518880 |
 
-**16-year backtest (2010-06 → 2026-04):** CAGR 8.11% / MDD −19.4% / Calmar 0.42 / Sharpe 0.69 — survives 2015 股灾 (−19%), 2018 trade war (+1%), 2020 COVID (−7%), 2022-23 bear (−5%).
+**16 年回测 (2010-06 → 2026-04)**: CAGR 8.11% / MDD −19.4% / Calmar 0.42 / Sharpe 0.69 — 历经 2015 股灾 (−19%)、2018 贸易战 (+1%)、2020 疫情 (−7%)、2022-23 熊市 (−5%) 全部活下来。
 
 ```bash
-# Daily diagnostic / quarterly rebalance signal
+# 日常诊断 / 季末调仓信号
 python research/factors_v2/run_all_weather_signal.py
-python research/factors_v2/run_all_weather_signal.py --t2     # opt-in T2 momentum overlay
-python research/factors_v2/run_all_weather_signal.py --push   # DingTalk push
+python research/factors_v2/run_all_weather_signal.py --t2     # 可选: 启用 T2 双动量 overlay
+python research/factors_v2/run_all_weather_signal.py --push   # 推钉钉
 ```
 
-The previous default was T2 dual-momentum overlay (CAGR 8.59% / Calmar 0.49). Alpha-decomposition on 2026-04-28 found T2 OOS Calmar is **0.18 lower** than static (0.96 vs 1.13 on 2018-2026): one missed V-shaped recovery (2020-04, STK OFF when STK +29.6% next quarter) cancels years of small correct calls. Static is the new default; `--t2` keeps the overlay available for users who want a 2015-style crash insurance.
+之前默认是 T2 双动量 overlay (CAGR 8.59% / Calmar 0.49). 2026-04-28 做了 alpha 解构, 发现 T2 在 OOS 段 Calmar 比静态低 **0.18** (0.96 vs 1.13, 2018-2026 段): 一次错判 V 型反弹 (2020-04 STK OFF, 但下季 STK +29.6%) 把多年小对全部抵消. 静态成为新默认, `--t2` 保留为可选 (适合想要 2015 股灾保险的用户).
 
 ---
 
-## What was systematically falsified
+## 系统证伪的策略 (这才是真宝藏)
 
-This is the gold of the repo. Every entry below has a rigorous random-control + OOS test in [`research/foundation/`](research/foundation/).
+下面每一项都有 [`research/foundation/`](research/foundation/) 框架做的严格随机对照 + OOS 测试.
 
-| Strategy category | Verdict | Evidence |
+| 策略类别 | 判定 | 证据 |
 |---|---|---|
-| Xueqiu retail consensus (Top30) | ⛔ Inverted signal — Top30 +0.7%/yr, Bottom30 +7.5%/yr | `docs/quant_strategy_lessons.md` |
-| 12 single factors (BM, ROE, momentum, low-vol, BAB, MAX, reversal, …) | ⛔ All `t<2`. Strongest signal is **inverse** (avoid high turnover, `t=−5.37`) | `memory/factor_battery_findings.md` |
-| Low-vol baseline (60-day std, top 20%) | ⛔ Train Calmar +1.79 → **Test Calmar −0.71** OOS reversal | `research/factors_v2/output/low_vol_foundation_validation.md` |
-| 一进二板 / 打板战法 (H1, H8 V1/V2/V3) | ⛔ 65,503 events / 16 years — all variants negative alpha. +1.87% alpha exists in T close → T+1 open overnight gap (limits to arbitrage, retail can't capture) | `research/factors_v2/output/first_board_research_summary.md` |
-| Textbook board rules (H9: volume 2x / small-cap+low-price / history limit-ups / next-day +4% gap) | ⛔ All 5 rules **reverse-direction** at daily frequency. ALL stack `α=−1.75% t=−8.23` | `research/factors_v2/output/h9_textbook_rules.md` |
-| T2 dual-momentum overlay on all-weather | ⚠️ Train alpha valid, **Test OOS Calmar −0.18 vs static**. Production demoted to opt-in | `research/factors_v2/output/all_weather_alpha_decomp.md` |
+| 雪球散户共识 (Top30) | ⛔ 信号反向 — Top30 +0.7%/年, Bottom30 +7.5%/年 | `docs/quant_strategy_lessons.md` |
+| 12 个单因子 (BM, ROE, 动量, 低波, BAB, MAX, 反转 …) | ⛔ 全 `t<2`. 最强信号是**反向** (避开高换手, `t=−5.37`) | `memory/factor_battery_findings.md` |
+| 低波 baseline (60d std, top 20%) | ⛔ Train Calmar +1.79 → **Test Calmar −0.71**, OOS 反转 | `research/factors_v2/output/low_vol_foundation_validation.md` |
+| 一进二板 / 打板战法 (H1, H8 V1/V2/V3) | ⛔ 65,503 事件 / 16 年 — 所有变体负 alpha. +1.87% alpha 集中在 T close→T+1 open 的隔夜跳空 (limits to arbitrage, 散户拿不到) | `research/factors_v2/output/first_board_research_summary.md` |
+| 教学视频规则 (H9: 量能 2x / 小盘低价 / 历史涨停 / 次日高开 4%+) | ⛔ 5 条规则在日级**全部反向**. 全叠加 `α=−1.75% t=−8.23` | `research/factors_v2/output/h9_textbook_rules.md` |
+| T2 双动量 overlay (全天候) | ⚠️ Train alpha 真实, **Test OOS Calmar 比静态低 0.18**. 生产已降级为可选 | `research/factors_v2/output/all_weather_alpha_decomp.md` |
 
-The pattern that recurs: backtest shows 5-20% alpha → random-control + OOS shrinks it to 0-2% → cost eats the rest → real alpha was structural beta or look-ahead leakage.
+反复出现的模式: 回测显示 5-20% alpha → 加随机对照 + OOS 后缩到 0-2% → 成本吃掉剩下的 → 真实 alpha 其实是宇宙 beta 或前视泄漏.
 
 ---
 
-## The infrastructure (this is the actual deliverable)
+## 基础设施 (这才是真正的交付物)
 
-### `research/foundation/` — the audit-enforced backtest framework
+### `research/foundation/` — 强制审计的回测框架
 
-After 5 fixed bugs (B1-B4 + defensive guards) and 7-segment self-test, this is now the only path for new strategies. **It refuses to run without random control + OOS split + benchmark match + cost model.**
+经过 5 个 bug 修复 (B1-B4 + 防御保护) 和 7 段 self-test 全过, 现在是**新策略的唯一通道**。**没有随机对照 + OOS 切分 + 基准匹配 + 成本模型, 框架直接拒跑**。
 
 ```python
 from research.foundation import (
@@ -61,166 +61,165 @@ from research.foundation import (
     Backtest, StandardReport,
 )
 
-data = DataBundle.load()                                # auto-audits OHLCV coverage / consistency
-uni  = Universe.broad(data, mcap_range=(30, 500))        # explicit size tier
+data = DataBundle.load()                                 # 自动审计 OHLCV 覆盖率 / 一致性
+uni  = Universe.broad(data, mcap_range=(30, 500))         # 显式市值层级
 strat = CrossSectionalStrategy(name="my_factor",
                                 factor_fn=my_fn,
                                 top_pct=0.20, hold_days=180)
 bt = Backtest(strategy=strat, universe=uni,
-              cost_model=CostModel.a_share_retail_quarterly(),  # 33-73 bp realistic
-              random_control=True,                                # required, raises if missing
-              train_test_split=("2018-12-31", "2019-01-01"),     # required
-              n_random_repeats=1)                                  # do NOT raise; inflates t
+              cost_model=CostModel.a_share_retail_quarterly(),  # 33-73bp 真实成本
+              random_control=True,                                # 必填, 否则抛异常
+              train_test_split=("2018-12-31", "2019-01-01"),     # 必填
+              n_random_repeats=1)                                  # 不要调高, 会人为缩 random std 抬 t-stat
 result = bt.run()
 StandardReport.from_result(result).print()
 ```
 
-**Self-test the framework after any change:**
+**改框架后必跑 self-test**:
 ```bash
 python research/foundation/self_test.py
-# 7 segments must all pass: NULL, RANDOM, high-turnover (negative), look-ahead (positive),
-# EventDriven NULL (18,972 events), cost consistency, train/test split.
+# 7 段必须全过: NULL, RANDOM, 高换手 (反向), 前视 (正向), EventDriven NULL (18,972 事件), 成本一致性, 拆分严格性
 ```
 
-Documented bugs and data-layer biases: [`research/foundation/AUDIT_FINDINGS_2026_04_27.md`](research/foundation/AUDIT_FINDINGS_2026_04_27.md).
+完整 bug 清单和数据偏差: [`research/foundation/AUDIT_FINDINGS_2026_04_27.md`](research/foundation/AUDIT_FINDINGS_2026_04_27.md).
 
-### `data/cubes.db` — 55,000-record Xueqiu dataset
+### `data/cubes.db` — 55,000 条雪球数据集
 
-Even though the derived signal is inverted, this dataset is genuinely unique:
+虽然衍生信号是反向的, 但这数据集本身在公网上独一无二:
 
-- 8,070 deduplicated smart-money rebalance events (887 duplicates removed)
-- 1,373 unique stocks, 2014–2026
-- Live validation labels on 14 months (53.76% win rate on 2025-Jan → 2026-Feb paper trades)
+- 8,070 笔去重后的 smart-money 调仓事件 (剔除 887 笔重复)
+- 1,373 只独立股票, 2014–2026
+- 14 个月 live 验证标签 (2025-Jan → 2026-Feb 模拟交易胜率 53.76%)
 
-Use it for behavioral / sentiment research; do not use it as a tradable signal.
+适合做行为/情绪类研究, **不要**当可交易信号用.
 
 ---
 
-## The journey (post-audit numbers only)
+## 项目时间线 (post-audit 数字)
 
-| Phase | Period | Outcome |
+| 阶段 | 时间 | 结果 |
 |---|---|---|
-| v1–v4 Bilibili/early Xueqiu | 2025-08 → 2025-12 | Look-ahead, broken metrics. Pre-audit Calmar 0.99, post-audit ~0.05 |
-| v5 long-short pivot | 2026-01 | Ann ret 31% → 23% after realistic costs → broken (A-shares can't short) |
-| v6.1 SRF + go-flat | 2026-02 | Pre-audit Calmar 1.13 → post-audit Calmar 0.07 (go-flat used current period's forward return) |
-| Factor library (factors_v2) | 2026-03 → 2026-04 | 12 factors tested with random control. **All `t<2`**. Pivot to ETF allocation |
-| All-weather discovery | 2026-04-21 | 30/30/40 → CAGR 8.13%, MDD −19.4%, Calmar 0.42 (vs prior 70/30 stock-only Calmar 0.18) |
-| T2 momentum overlay | 2026-04-23 | Full Calmar 0.49, OOS Test Calmar 0.96 |
-| Foundation framework | 2026-04-27 | 5 engine bugs fixed, 7-segment self-test, low-vol falsified OOS |
-| H8 / H9 first-board | 2026-04-27→28 | 65k events, 6 textbook rule variants, all negative alpha |
-| **T2 decomp + simplification** | 2026-04-28 | T2 OOS alpha turns negative; production demoted to static 30/30/40 |
+| v1–v4 B 站/早期雪球 | 2025-08 → 2025-12 | 前视, 指标错. 修前 Calmar 0.99, 修后 ~0.05 |
+| v5 多空对冲变种 | 2026-01 | 年化 31% → 23% (真实成本) → 报废 (A 股不能做空) |
+| v6.1 SRF + go-flat | 2026-02 | 修前 Calmar 1.13 → 修后 0.07 (go-flat 用了当期未来收益) |
+| 因子库 (factors_v2) | 2026-03 → 2026-04 | 12 因子加随机对照测试. **全 `t<2`**. 转向 ETF 配置 |
+| 全天候发现 | 2026-04-21 | 30/30/40 → CAGR 8.13%, MDD −19.4%, Calmar 0.42 (vs 此前 70/30 纯股 Calmar 0.18) |
+| T2 动量 overlay | 2026-04-23 | Full Calmar 0.49, Test OOS Calmar 0.96 |
+| Foundation 框架 | 2026-04-27 | 修 5 个引擎 bug, 7 段 self-test, 低波 OOS 证伪 |
+| H8 / H9 一进二板 | 2026-04-27 → 28 | 65k 事件, 教学规则 6 个变体全部负 alpha |
+| **T2 解构 + 简化** | 2026-04-28 | T2 OOS alpha 转负, 生产降级为静态 30/30/40 默认 |
 
-Audit narrative in git log:
-- `1a1fb68` look-ahead fix · `9a88817` long-only · `25c2684` realistic costs
-- `dd71ccd` foundation v1 · `8e44ad6` H8/H9 falsification · `2b6551d` T2 alpha decomp + static default
+git log 中的审计轨迹:
+- `1a1fb68` 修前视 · `9a88817` long-only · `25c2684` 真实成本
+- `dd71ccd` foundation v1 · `8e44ad6` H8/H9 证伪 · `2b6551d` T2 alpha 解构 + 静态默认
 
 ---
 
-## Reproducing the results
+## 复现实验
 
 ```bash
 # Python 3.12, Windows/Linux
 pip install -r requirements.txt
 
-# 1. Build data foundation (one-time, ~10 min)
+# 1. 一次性建好数据基础 (~10 分钟)
 python research/data_prep/build_data_foundation.py
 python research/data_prep/update_stock_data.py
 
-# 2. Run the foundation self-test (must all pass)
+# 2. 跑框架自检 (必须全过)
 python research/foundation/self_test.py
 
-# 3. Reproduce the all-weather production
-python research/factors_v2/all_weather_oos.py                # OOS for 6 momentum variants
-python research/factors_v2/all_weather_alpha_decomp.py       # T2 vs static decomposition (this is the key one)
+# 3. 复现全天候生产
+python research/factors_v2/all_weather_oos.py                # 6 个动量变体的 OOS
+python research/factors_v2/all_weather_alpha_decomp.py       # T2 vs 静态 alpha 解构 (★ 关键这一个)
 
-# 4. Reproduce the falsifications
+# 4. 复现各种证伪
 python research/foundation/strategies_first_board_executable.py    # H8 (V1/V2/V3)
-python research/foundation/strategies_h9_textbook_rules.py         # H9 (5 textbook rules)
-python research/foundation/strategies_lowvol.py                    # low-vol OOS reversal
+python research/foundation/strategies_h9_textbook_rules.py         # H9 (5 条教学规则)
+python research/foundation/strategies_lowvol.py                    # 低波 OOS 反转
 
-# 5. Daily production (run at quarter-end for rebalance)
-python research/factors_v2/run_all_weather_signal.py              # static 30/30/40 (default)
-python research/factors_v2/run_all_weather_signal.py --t2         # opt-in T2 overlay
-python research/factors_v2/run_all_weather_signal.py --push       # DingTalk push
+# 5. 日常生产 (季末跑一次出调仓单)
+python research/factors_v2/run_all_weather_signal.py              # 静态 30/30/40 (默认)
+python research/factors_v2/run_all_weather_signal.py --t2         # 可选 T2 overlay
+python research/factors_v2/run_all_weather_signal.py --push       # 推钉钉
 ```
 
-All numbers above are reproducible within rounding.
+上面所有数字四舍五入误差内可复现.
 
 ---
 
-## Five non-obvious findings (updated)
+## 5 条非显然发现
 
-1. **Retail consensus is a *negative* signal**, exactly as Barber-Odean (2000) predicted. Top30 picks underperform Bottom30 by 6.8pp/yr. No regime adaptation rescues this.
-2. **Cost dominates everything for retail.** Raw Top30 alpha is +14-17% gross; 56 bp round-trip × 83% turnover = 9.8%/yr cost. Net alpha is marginally negative. This is why most retail "alpha" disappears at honest cost models.
-3. **The +2% overnight gap on A-share limit-ups is real but unrealizable.** Foundation tests on 65,503 first-board events: a strategy entering at T-day close captures +1.87% (`t=+63`), but T-day close requires ex-post knowledge of whether the seal held. Strategies entering at T+1 open all show negative alpha — retail stands on the wrong side of the trade.
-4. **Trend-following momentum kills you in V-shaped recoveries.** T2 had Train Calmar +0.18 vs static (alpha was real in 2010-2018). 2020-04 V-rebound: T2 was STK OFF, STK delivered +29.6% next quarter, BOND +1.2% — one missed V-bottom canceled all small correct calls. OOS Calmar −0.18.
-5. **Five fixed engine bugs all flowed in the alpha-inflating direction.** B1: EventDriven holding +1 day inflates returns. B2: `n_random_repeats=30` shrinks random std → t-inflated. B3: event random baseline pulled from full timeline → market-environment alpha leaks in as signal alpha. B4: cross-sectional random pool overlapped with picks. B5: t-stat divides by zero on degenerate samples. There is no symmetry: bugs that *deflate* alpha are noticed and fixed by the user; bugs that *inflate* alpha sit silently in the engine for months.
-
----
-
-## What I would do differently (still true after 9 months)
-
-Documented in [`docs/quant_strategy_lessons.md`](docs/quant_strategy_lessons.md):
-
-1. **Replicate a known academic result before inventing anything.** Validate the engine on Fama-French / Jegadeesh-Titman first.
-2. **Pre-register one hypothesis at a time.** 81+ parameter experiments self-defeats statistically. Harvey-Liu-Zhu (2016) sets `t > 3.5` after multiple-testing correction.
-3. **Out-of-sample is sacred.** Choose holdout on day one; do not peek.
-4. **Cost is a parameter, not an afterthought.** Optimizing on 10 bp grids and shipping at 56 bp is the most common retail mistake.
-5. **Economic intuition gates statistics.** "Why should retail consensus predict returns?" had no good answer in 2025; we measured it anyway, and the data agreed with theory in 2026.
+1. **散户共识是负向信号**, 完全验证 Barber-Odean (2000) 的预测. Top30 比 Bottom30 跑输 6.8pp/年. regime 切换补救不了.
+2. **散户的成本压制一切**. Top30 raw alpha 是 +14-17% gross, 但 56bp 双边 × 83% 换手 = 9.8%/年成本. 净 alpha 微负. 这就是为什么大部分散户"alpha"在真实成本下消失.
+3. **A 股涨停股的 +2% 隔夜跳空真实存在但不可套利**. Foundation 在 65,503 笔首板事件验证: T 日 close 进场策略捕获 +1.87% (`t=+63`), 但 T 日 close 需要 ex-post 知道封单是否守住. T+1 open 进场的版本全部负 alpha — **散户站在 trade 的另一边**.
+4. **趋势跟随动量在 V 型反弹中要命**. T2 在 Train 段 Calmar +0.18 (alpha 在 2010-2018 真实), 2020-04 V 型反弹时 STK OFF, 下季 STK +29.6%, BOND +1.2% — 一次错过 V 底把多次小对全抵消. OOS Calmar −0.18.
+5. **修过的 5 个引擎 bug 全朝 alpha 高估方向偏**. B1: EventDriven 持仓多 1 天 → 收益虚高. B2: `n_random_repeats=30` → random std 缩小 → t-stat 虚高. B3: event random baseline 跨整个时间段抽 → 牛市信号 vs 熊市 random → 市场环境差异被算成 alpha. B4: cross-sectional random pool 没排除 picks. B5: t-stat 退化样本除零. **不存在对称: 让 alpha 缩小的 bug 用户会发现并报修, 让 alpha 膨胀的 bug 在引擎里默默躺好几个月**.
 
 ---
 
-## Repository structure
+## 如果重做我会怎么做 (9 个月后仍然成立)
+
+详见 [`docs/quant_strategy_lessons.md`](docs/quant_strategy_lessons.md):
+
+1. **先复现已知学术结论再发明任何东西**. 在 Fama-French / Jegadeesh-Titman 上验证引擎. 如果复现不出, 你的引擎是坏的, 后面所有"新发现"都是噪音.
+2. **预先注册一个假设**. 81 次参数实验是统计自杀. Harvey-Liu-Zhu (2016) 的标准是 multiple-testing 校正后 `t > 3.5`, 不是 3.0.
+3. **OOS 是神圣的**. 第一天就划好 holdout, 不要偷看. 先跑 81 次实验再算 OOS 不是 OOS.
+4. **成本是参数, 不是事后想起来的**. 用 10bp 优化, 用 56bp 上线, 是最常见的散户错误.
+5. **经济直觉是统计的门**. "散户共识为什么应该预测收益?" 一句话答不上, 就别测. Barber-Odean 在 2000 年就预言了我们 2026 年的实证.
+
+---
+
+## 仓库结构
 
 ```
 research/
-  foundation/                  ★ The audit-enforced backtest framework. New strategies MUST go here.
-    data.py                    DataBundle.load() with built-in audit
-    universe.py                Size-tier explicit Universe class
-    benchmark.py               Auto-matched benchmarks (raises on mismatch)
-    backtest.py                Required random_control + OOS + cost
-    strategies.py              CrossSectional / EventDriven base classes
-    self_test.py               7-segment framework health check
-    AUDIT_FINDINGS_2026_04_27.md  All known engine + data biases
-  factors_v2/                  Production all-weather + falsification reports
-    run_all_weather_signal.py  ★ Production quarterly rebalance signal
-    all_weather_alpha_decomp.py  T2 vs static alpha decomposition
-    output/                    All study reports as Markdown
-  baseline_v6_1/               Legacy Xueqiu strategy (preserved for audit reproducibility)
-  data_prep/                   Panel construction, OHLCV refresh
-  factors/                     Signal generators (mostly legacy)
+  foundation/                  ★ 强制审计的回测框架. 新策略必须从这里走.
+    data.py                    DataBundle.load() 内置审计
+    universe.py                显式市值层级 Universe
+    benchmark.py               自动匹配基准 (错配抛异常)
+    backtest.py                必填 random_control + OOS + cost
+    strategies.py              CrossSectional / EventDriven 基类
+    self_test.py               7 段框架健康检查
+    AUDIT_FINDINGS_2026_04_27.md  所有已知引擎 + 数据偏差
+  factors_v2/                  生产全天候 + 各类证伪报告
+    run_all_weather_signal.py  ★ 季末调仓生产信号
+    all_weather_alpha_decomp.py  T2 vs 静态 alpha 解构
+    output/                    所有研究 Markdown 报告
+  baseline_v6_1/               遗留雪球策略 (保留以便审计可复现)
+  data_prep/                   panel 构建 / OHLCV 刷新
+  factors/                     信号生成器 (大部分遗留)
 docs/
-  quant_strategy_lessons.md    ★ The Chinese-language structural reflection
-  factor_learning_notes_2026_04.md  Factor taxonomy reference
-archive/bilibili_legacy/       Earliest pipeline (preserved for context)
-data/                          SQLite DBs and OHLCV caches (gitignored)
-config.py                      Capital, ETF tickers, DingTalk webhook (gitignored)
-CLAUDE.md                      AI-assistant project rules + 4 hard production rules
+  quant_strategy_lessons.md    ★ 中文结构性反思
+  factor_learning_notes_2026_04.md  因子分类参考
+archive/bilibili_legacy/       最早的管线 (保留作上下文)
+data/                          SQLite 和 OHLCV 缓存 (gitignore)
+config.py                      本金 / ETF tickers / 钉钉 webhook (gitignore)
+CLAUDE.md                      AI 协作规则 + 4 条硬规则
 ```
 
-The 4 hard production rules in `CLAUDE.md` are reproduced here, since they survived 8 rounds of falsification:
+`CLAUDE.md` 里 4 条硬规则 (8 轮反复证伪后还活着, 在此重申):
 
-1. **No stock picking.** Any factor combination CAGR ≤ 12% — cannot beat a 70% DIV / 30% ChiNext static portfolio.
-2. **No timing / no rotation.** SMA60/120 trends, regime gates, momentum rotation — all whipsawed away.
-3. **No target-vol / no DD-brake.** Active de-risking misses rebounds; static rebalancing is structurally superior.
-4. **Quarterly is enough.** Daily/weekly bleed cost; monthly/quarterly differ negligibly.
+1. **不选股**. 任何因子组合 CAGR ≤ 12% — 跑不赢 70% 红利 / 30% 创业板静态组合.
+2. **不择时 / 不轮动**. SMA60/120 趋势, regime gate, 动量轮动 — 全被 whipsaw 毁掉.
+3. **不 target-vol / 不 DD-brake**. 主动降仓 = 错过反弹; 静态再平衡结构上更优.
+4. **季度足矣**. 日/周浪费 cost; 月/季差异微小.
 
 ---
 
-## Tech stack
+## 技术栈
 
 Python 3.12 · Pandas · NumPy · BaoStock / AkShare / TuShare · SQLite / SQLAlchemy · Matplotlib
 
 ---
 
-## Citation
+## 引用
 
 ```
-Zhang, J. (2026). Bili_Stock: An honest A-share retail quant case study —
-six categories of strategy systematically falsified, settling on a static
-30/30/40 all-weather ETF portfolio. https://github.com/Soli22de/Bili_Stock
+张靖恒 (2026). Bili_Stock: 一个诚实的 A 股散户量化复盘 —
+6 类策略被系统证伪, 最终回到静态 30/30/40 全天候 ETF.
+https://github.com/Soli22de/Bili_Stock
 ```
 
 ---
 
-*Last updated: 2026-04-28. Production: static 30/30/40, quarterly rebalance, no timing, no picking. Every claim above is reproducible from the scripts in this repo.*
+*最后更新: 2026-04-28. 当前生产: 静态 30/30/40, 季度再平衡, 不择时不选股. 上面所有声明均可由本仓库脚本复现.*
