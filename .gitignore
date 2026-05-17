@@ -6,6 +6,7 @@ data/
 *.xlsx
 *.log
 logs/
+research/factors_v2/cache/
 
 # Config
 config.py

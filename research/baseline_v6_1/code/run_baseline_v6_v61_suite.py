@@ -604,7 +604,15 @@ def _apply_risk_controls(
     return x, risk_log
 
 
-def _metrics(x: pd.DataFrame) -> dict:
+def _metrics(x: pd.DataFrame, hold_step: int = 12) -> dict:
+    """
+    Compute strategy metrics.
+
+    hold_step: business days per rebalance period. Used for annualisation.
+               Default 12 preserves legacy behavior; callers varying hold_step
+               MUST pass the actual value — otherwise ann_ret / sharpe / calmar
+               are wrong whenever hold_step != 12.
+    """
     if x is None or x.empty:
         out = {
             "ann_ret": np.nan,
@@ -631,7 +639,7 @@ def _metrics(x: pd.DataFrame) -> dict:
     peak = curve.cummax()
     dd = curve / peak - 1.0
     mdd = float(dd.min()) if not dd.empty else float("nan")
-    ann_factor = 252.0 / 12.0  # ~21 trading days per period
+    ann_factor = 252.0 / float(max(int(hold_step), 1))
     avg = float(ret_series.mean()) if not ret_series.empty else np.nan
     vol = float(ret_series.std(ddof=0)) if not ret_series.empty else np.nan
     ann_ret = float((1.0 + avg) ** ann_factor - 1.0) if pd.notna(avg) else np.nan
@@ -834,7 +842,7 @@ def _run_one(
         choppy_loss_floor=float(cfg["choppy_loss_floor"]),
         go_flat_choppy=bool(cfg["go_flat_choppy"]),
     )
-    m = _metrics(ret)
+    m = _metrics(ret, hold_step=int(hold_step))
     attr = _attribution(hold, p)
     attr_sum = attr[["allocation", "selection", "timing", "total_excess"]].sum() if not attr.empty else pd.Series([np.nan, np.nan, np.nan, np.nan], index=["allocation", "selection", "timing", "total_excess"])
     sf = _sell_fly(hold, p, tp_event)

@@ -19,13 +19,18 @@ PROD = dict(
     cap_up=0.20,
     with_takeprofit=True,
     risk_cfg=dict(
-        # LONG-ONLY A-share backtest with realistic costs (2010-2025):
-        #   ann_ret=22.9%, MDD=-23.0%, calmar=0.99, sharpe=1.32
-        #   Annual trading cost: 9.8% (83% turnover × 56bp round-trip)
-        #   Win rate: 58.8% (excluding go-flat), 1/16 years negative
+        # LONG-ONLY A-share backtest (2015-2025, post-audit honest numbers):
+        #   ann_ret ~2%, MDD -45% to -50%, calmar 0.04-0.05, hit_ratio ~47%
+        #   Zero-cost alpha: +5.3%/yr  |  Annual trading cost: -9.8%/yr
+        #   → Cost exceeds gross alpha; net is marginally negative.
+        #
+        # Historic inflated numbers (ann=22.9%, calmar=0.99) were invalidated
+        # by audit `1a1fb68` — go-flat used future returns (look-ahead bias).
+        # See docs/quant_strategy_lessons.md for the structural post-mortem.
         #
         # Cost model: buy 13bp + sell 43bp = 56bp round-trip (asymmetric)
-        # hold_step=12 is stable in 10-15 range; 16-20 is unstable (overfit risk)
+        # hold_step=12 shows stable calmar in 10-15 range; 16-20 unstable.
+        # (Turnover is the binding constraint — see hold_step sweep results.)
         non_up_vol_q=0.50,
         dd_soft=-0.05,
         dd_mid=-0.07,

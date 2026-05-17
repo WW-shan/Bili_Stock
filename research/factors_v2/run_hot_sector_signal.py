@@ -32,7 +32,11 @@ if ROOT not in sys.path:
 STOCK_DATA_DIR = os.path.join(ROOT, "data", "stock_data")
 OUT_DIR        = os.path.join(ROOT, "research", "factors_v2", "output", "live")
 TOP_SECTOR_N   = 5
-HISTORY_DAYS   = 15   # 用15日涨停历史建立板块→股票映射
+HISTORY_DAYS   = 15
+MIN_AMOUNT_M   = 200   # 最低日成交额 200百万（2亿），过滤僵尸股
+
+from research.factors_v2.stock_names import get_name_map, is_st
+_NAME_MAP: dict = {}
 
 
 # ── AKShare: 涨停原始数据 ────────────────────────────────────────────── #
@@ -114,16 +118,36 @@ def _is_etf(sym: str) -> bool:
 
 
 def _build_clean_pool() -> pd.DataFrame:
-    """计算Factor A干净池（cnt28=0）。"""
+    """计算Factor A干净池（cnt28=0，主板，非ST，流动性达标）。"""
     import glob
+    global _NAME_MAP
+    if not _NAME_MAP:
+        try:
+            _NAME_MAP = get_name_map()
+        except Exception:
+            _NAME_MAP = {}
+
     files  = glob.glob(os.path.join(STOCK_DATA_DIR, "S[HZ]*.csv"))
     today  = pd.Timestamp(datetime.today().date())
     cutoff = today - timedelta(days=65)
 
     rows = []
     for fp in files:
-        sym = os.path.splitext(os.path.basename(fp))[0].upper()
+        sym  = os.path.splitext(os.path.basename(fp))[0].upper()
+        code = sym[2:]
         if _is_etf(sym):
+            continue
+        # 主板过滤：排除创业板(300/301/302)、科创板(688)、北交所(8/4开头)
+        if sym.startswith("SZ") and code[:3] in {"300","301","302"}:
+            continue
+        if sym.startswith("SH") and code[:3] in {"688","689"}:
+            continue
+        if code[:1] in {"8","4"}:
+            continue
+
+        # ST过滤
+        name = _NAME_MAP.get(code, "")
+        if is_st(name):
             continue
 
         try:
@@ -161,12 +185,17 @@ def _build_clean_pool() -> pd.DataFrame:
         fd15     = ((c < prev_c) & (c <= o) & (v >= 1.15 * v.shift(1))).astype(float)
         cnt28    = (top15o * fd15).rolling(28, min_periods=1).sum()
 
+        # 成交额（百万）= 收盘价 × 成交量 / 1e6（BaoStock成交量单位为手=100股）
+        amount_m = float(c.iloc[-1] * v.iloc[-1] * 100 / 1e6)
+
         rows.append({
             "stock_symbol": sym,
-            "stock_code":   sym[2:],
+            "stock_code":   code,
+            "stock_name":   name,
             "latest_date":  df["date"].max(),
             "cnt28":        float(cnt28.iloc[-1]) if len(cnt28) else np.nan,
             "close":        float(c.iloc[-1]),
+            "amount_m":     amount_m,
         })
 
     if not rows:
@@ -175,6 +204,8 @@ def _build_clean_pool() -> pd.DataFrame:
     pool = pd.DataFrame(rows)
     pool = pool[pool["latest_date"] >= today - timedelta(days=10)]
     pool["is_clean"] = pool["cnt28"] == 0
+    # 流动性过滤：干净池里再按成交额筛
+    pool.loc[pool["is_clean"] & (pool["amount_m"] < MIN_AMOUNT_M), "is_clean"] = False
     return pool
 
 
@@ -242,68 +273,55 @@ def main():
             if code not in clean_codes:
                 continue
             if code in today_zt_codes:
-                continue   # 今日已涨停，排除
-            # 找到了！
-            sym  = ("SH" + code) if code.startswith("6") else ("SZ" + code)
+                continue
+            sym   = ("SH" + code) if code.startswith("6") else ("SZ" + code)
             row_c = clean[clean["stock_code"] == code]
-            close_val = float(row_c["close"].iloc[0]) if not row_c.empty else np.nan
-            name_val  = ""
-            # 从涨停历史取名称
-            name_rows = zt_all[zt_all["stock_code"] == code]
-            if not name_rows.empty:
-                name_val = str(name_rows["stock_name"].iloc[0])
+            if row_c.empty:
+                continue
+            close_val  = float(row_c["close"].iloc[0])
+            amount_val = float(row_c["amount_m"].iloc[0])
+            # 优先用名称缓存，fallback 涨停历史
+            name_val = row_c["stock_name"].iloc[0]
+            if not name_val:
+                nr = zt_all[zt_all["stock_code"] == code]
+                name_val = str(nr["stock_name"].iloc[0]) if not nr.empty else code
             candidates.append({
                 "stock_symbol": sym,
                 "stock_code":   code,
                 "stock_name":   name_val,
                 "sector":       sector,
                 "close":        close_val,
-                "note":         "热点板块+干净+未涨停",
+                "amount_m":     amount_val,
             })
 
-    df_cand = pd.DataFrame(candidates).drop_duplicates("stock_code") if candidates else pd.DataFrame()
+    df_cand = (pd.DataFrame(candidates).drop_duplicates("stock_code")
+               .sort_values("amount_m", ascending=False)
+               if candidates else pd.DataFrame())
 
     # ── 输出 ──────────────────────────────────────────────────────────── #
     print(f"\n{'='*65}")
-    print(f"最终候选股 — 热点板块 × Factor A干净池 × 今日未涨停")
+    print(f"候选股 — 热点板块 × 主板 × 干净 × 非ST × 今日未涨停 × 流动性>2亿")
     print(f"{'='*65}")
 
     if df_cand.empty:
-        print("\n  暂无符合条件的候选股")
-        print("  可能原因：热点板块的股票在15日内未涨停过，所以无板块映射")
+        print("\n  暂无候选股")
     else:
-        print(f"\n  共 {len(df_cand)} 只候选股（按板块分组）：\n")
+        # 每个板块只展示成交额最大的3只（最易操作）
+        print(f"\n  共 {len(df_cand)} 只（每板块展示成交额最大3只）\n")
         for sector in hot_sectors:
-            sub = df_cand[df_cand["sector"] == sector]
+            sub = df_cand[df_cand["sector"] == sector].head(3)
             if sub.empty:
                 continue
-            print(f"  【{sector}】({len(sub)}只)")
-            print(f"  {'代码':<8s} {'名称':<10s} {'收盘':>8s}")
-            print(f"  {'-'*32}")
+            print(f"  【{sector}】")
+            print(f"  {'代码':<10s} {'名称':<10s} {'收盘':>7s}  {'日成交(亿)':>9s}")
+            print(f"  {'-'*44}")
             for _, r in sub.iterrows():
-                print(f"  {r['stock_symbol']:<8s} {r['stock_name']:<10s} {r['close']:>8.2f}")
+                amt_yi = r["amount_m"] / 100
+                print(f"  {r['stock_symbol']:<10s} {r['stock_name']:<10s} "
+                      f"{r['close']:>7.2f}  {amt_yi:>8.1f}亿")
             print()
 
-    # 补充：今日涨停 × 干净池 交集（供参考）
     zt_clean_ref = [c for c in today_zt_codes if c in clean_codes]
-    if zt_clean_ref:
-        print(f"\n  【参考】今日涨停 × 干净池 = {len(zt_clean_ref)} 只（已发动，谨慎追高）")
-        for code in zt_clean_ref[:10]:
-            sym  = ("SH" + code) if code.startswith("6") else ("SZ" + code)
-            name_rows = zt_all[zt_all["stock_code"] == code]
-            name = str(name_rows["stock_name"].iloc[0]) if not name_rows.empty else ""
-            sector_rows = zt_all[(zt_all["stock_code"] == code) & (zt_all["date"] == today)]
-            sector = str(sector_rows["sector"].iloc[0]) if not sector_rows.empty else ""
-            print(f"    {sym}  {name:<8s}  {sector}")
-        if len(zt_clean_ref) > 10:
-            print(f"    ... 共{len(zt_clean_ref)}只，见CSV")
-
-    # 操作提示
-    print(f"\n【操作提示】")
-    print(f"  · 上述候选股：近期同板块有涨停，个股未发动且无出货信号")
-    print(f"  · 板块映射来自近{HISTORY_DAYS}日涨停记录，覆盖度受历史数据限制")
-    print(f"  · 建议：对照干净池CSV，手动确认个股走势再操作")
-    print(f"  · 持有约12个交易日后重新运行本脚本\n")
 
     # 保存
     out_clean = os.path.join(OUT_DIR, f"clean_pool_{today}.csv")
@@ -358,22 +376,24 @@ def _build_markdown(result: dict) -> tuple[str, str]:
         lines.append(f"- **{row['sector']}** 涨停{int(row['涨停次数'])}次  {row['代表股']}")
     lines.append("")
 
-    # 候选股（按板块）
+    # 候选股（按板块，每板块最多3只，按成交额排序）
     if df_cand.empty:
         lines.append("### 候选股\n暂无符合条件的股票\n")
     else:
-        lines.append(f"### 候选股（热点板块 × 干净 × 今日未涨停）共{len(df_cand)}只\n")
         hot_sectors = sector_heat.head(TOP_SECTOR_N)["sector"].tolist()
+        shown_total = sum(min(3, len(df_cand[df_cand["sector"]==s])) for s in hot_sectors)
+        lines.append(f"### 候选股（主板×干净×非ST×今日未涨停）Top{shown_total}\n")
+        lines.append(f"| 代码 | 名称 | 收盘 | 日成交 | 板块 |")
+        lines.append(f"|---|---|---|---|---|")
         for sector in hot_sectors:
-            sub = df_cand[df_cand["sector"] == sector]
-            if sub.empty:
-                continue
-            lines.append(f"**【{sector}】** {len(sub)}只")
+            sub = df_cand[df_cand["sector"] == sector].head(3)
             for _, r in sub.iterrows():
+                amt = f"{r['amount_m']/100:.1f}亿"
                 lines.append(
-                    f"- {r['stock_symbol']} {r['stock_name']}  ¥{r['close']:.2f}"
+                    f"| {r['stock_symbol']} | **{r['stock_name']}** "
+                    f"| {r['close']:.2f} | {amt} | {sector} |"
                 )
-            lines.append("")
+        lines.append("")
 
     # 今日涨停×干净（参考）
     if zt_clean_ref:
