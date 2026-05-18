@@ -108,3 +108,11 @@ median_t = np.median(results)
 ```
 
 **禁止**: `n_random_repeats > 1` (除非你懂 t-stat 会被压制, 并显式接受这个偏差).
+
+---
+
+## 2026-05-18 patches inspired by WW-shan
+
+- **Literal[False] type-level dry-run enforcement**: 来自 `WW-shan/Crypto_Research_Agent/pipeline/paper_sim_loop.py`. `Backtest()` 现在带 `execution_mode: Literal["research","paper"]` + `live_capital_enabled: Literal[False]`. 跑 live 必须走独立 execution 层, foundation **不解锁**.
+- **Train/test gap_days**: 来自 `WW-shan/meme/pipeline/train_hybrid.py` 的 `_split_lifecycle_files_three_way` enforce_no_overlap 启发. A 股 cross-sectional 域适配为 feature look-ahead 防御——`_split_train_test` 新增 `min_gap_days` 参数 (默认 60), train 末日和 test 首日之间留 buffer, 吸收最长滚动窗口因子. 短于建议值抛 warning (向后兼容).
+- **assert_no_feature_lookahead**: 检测因子列是否与自身 shift(1) 高度相关 (>0.95). 在 `DataBundle` 上作为静态方法可用, 可在回测前验证因子不含未来数据.

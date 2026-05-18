@@ -2,6 +2,8 @@
 Backtest — 强制 random control 的统一回测引擎
 ================================================
 **设计意图**: random_control 是必填参数, 没传直接报错. 这是项目反复犯错的根因.
+              execution_mode 和 live_capital_enabled 从类型上阻止 live 交易,
+              强制 foundation 只做 research/paper.
 
 API 示例:
     bt = Backtest(
@@ -18,7 +20,8 @@ API 示例:
 """
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Literal
+import datetime as dt
 
 import numpy as np
 import pandas as pd
@@ -74,6 +77,10 @@ class BacktestResult:
     test_summary: Dict = field(default_factory=dict)
     full_summary: Dict = field(default_factory=dict)
 
+    # Patch from WW-shan: execution mode tracking
+    execution_mode: str = "research"
+    live_capital_enabled: bool = False
+
 
 # ── Backtest 引擎 ────────────────────────────────────────────────────────────
 class Backtest:
@@ -103,7 +110,10 @@ class Backtest:
                  n_random_repeats: int = 1,
                  year_start: int = 2017,
                  year_end: int = 2025,
-                 seed: int = 42):
+                 seed: int = 42,
+                 # Patch from WW-shan: type-level dry-run enforcement
+                 execution_mode: Literal["research", "paper"] = "research",
+                 live_capital_enabled: Literal[False] = False):
         # 强制 random_control 显式
         if not isinstance(random_control, bool):
             raise MissingRandomControl(REQUIRED_RANDOM_CONTROL_DOC)
@@ -112,6 +122,12 @@ class Backtest:
                 "选择 random_control=False 必须提供 random_control_reason. " +
                 REQUIRED_RANDOM_CONTROL_DOC
             )
+
+        # Runtime defense-in-depth: foundation 不做 live
+        assert live_capital_enabled is False, (
+            "Foundation is research-only. Live trading must go through a separate "
+            "execution layer with its own audit pipeline."
+        )
 
         self.strategy = strategy
         self.universe = universe
@@ -124,6 +140,8 @@ class Backtest:
         self.year_end = year_end
         self.seed = seed
         self.rng = np.random.default_rng(seed)
+        self.execution_mode = execution_mode
+        self.live_capital_enabled = live_capital_enabled
 
     def run(self, verbose: bool = True) -> BacktestResult:
         """主回测流程"""
@@ -146,6 +164,8 @@ class Backtest:
             train_test_split=self.train_test_split,
             train_periods=train,
             test_periods=test,
+            execution_mode=self.execution_mode,
+            live_capital_enabled=self.live_capital_enabled,
         )
         self._finalize(backtest_result)
         return backtest_result
@@ -157,6 +177,8 @@ class Backtest:
         print(f"  策略类型: {self.strategy.kind()}")
         print(f"  宇宙:    {self.universe.describe()}")
         print(f"  成本:    {self.cost_model.describe()}")
+        print(f"  Execution mode: {self.execution_mode}", end="")
+        print(f"  (live_capital_enabled={self.live_capital_enabled})")
         print(f"  Random control: {self.random_control}", end="")
         if not self.random_control:
             print(f"  (理由: {self.random_control_reason})")
@@ -329,13 +351,31 @@ class Backtest:
         return float(np.mean(rets)) if rets else float("nan")
 
     # ── Train/Test 拆分 ───────────────────────────────────────────────────────
-    def _split_train_test(self, results: List[PeriodResult]) -> Tuple[List, List]:
+    def _split_train_test(self, results: List[PeriodResult],
+                           min_gap_days: int = 60) -> Tuple[List, List]:
+        """
+        拆 train/test, 加 gap_days 防 feature look-ahead.
+
+        Args:
+            min_gap_days: 期望 train 与 test 之间的最小间隔天数 (默认 60).
+                         短于此值抛 warning (不是 error), 因为旧代码按 0 天 gap 工作.
+        """
         if not self.train_test_split:
             return results, []
         train_end = pd.Timestamp(self.train_test_split[0])
         test_start = pd.Timestamp(self.train_test_split[1])
         train = [r for r in results if r.signal_date <= train_end]
         test  = [r for r in results if r.signal_date >= test_start]
+
+        # Patch from WW-shan: gap_days 防滚动窗口因子 look-ahead
+        gap_days = (test_start - train_end).days
+        if gap_days < min_gap_days:
+            warnings.warn(
+                f"Train/test 间隔仅 {gap_days} 天 (建议 ≥ {min_gap_days} 天). "
+                f"滚动窗口因子 (如 60 日动量) 可能泄漏未来信息到 train 段.",
+                UserWarning, stacklevel=2,
+            )
+
         return train, test
 
     # ── Summary stats ─────────────────────────────────────────────────────────

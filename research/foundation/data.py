@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 
-from .exceptions import DataAuditFailure
+from .exceptions import DataAuditFailure, LookAheadBiasDetected
 
 ROOT      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PANEL     = os.path.join(ROOT, "data", "fundamentals", "panel_quarterly.csv")
@@ -61,6 +61,41 @@ class DataBundle:
     def __post_init__(self):
         # Mark as frozen after creation to prevent accidental mutation
         object.__setattr__(self, '_frozen', True)
+
+    @staticmethod
+    def assert_no_feature_lookahead(panel: pd.DataFrame,
+                                      factor_col: str,
+                                      date_col: str = "report_date",
+                                      code_col: str = "code",
+                                      threshold: float = 0.95) -> None:
+        """
+        粗略检测 factor 列是否含未来依赖: 按 (code, date) 排序后,
+        shift(1) 的因子值与当前值相关性过高 → 大概率前视.
+
+        Args:
+            panel: 包含 factor_col 的 DataFrame
+            factor_col: 因子列名
+            date_col: 日期列名
+            code_col: 股票代码列名
+            threshold: 相关性阈值 (默认 0.95)
+
+        Raises:
+            LookAheadBiasDetected: 如果检测到疑似前视
+        """
+        if factor_col not in panel.columns:
+            return  # 无法检测, 跳过
+        df = panel[[code_col, date_col, factor_col]].dropna().copy()
+        df = df.sort_values([code_col, date_col])
+        df["factor_prev"] = df.groupby(code_col, sort=False)[factor_col].shift(1)
+        df = df.dropna()
+        if len(df) < 100:
+            return
+        corr = df[factor_col].corr(df["factor_prev"])
+        if corr > threshold:
+            raise LookAheadBiasDetected(
+                f"因子 '{factor_col}' 与自身 shift(1) 的相关性 {corr:.3f} > {threshold}, "
+                f"疑似前视偏差 (未来数据泄漏)."
+            )
 
     @classmethod
     def load(cls,
