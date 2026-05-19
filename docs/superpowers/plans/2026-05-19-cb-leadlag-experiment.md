@@ -6,7 +6,7 @@
 
 **Architecture:** Build one locked, falsifiable MVP experiment around 20-trading-day conversion-premium compression. Keep data loading, panel construction, factor calculation, metrics, and reporting separate enough to test without network access.
 
-**Tech Stack:** Python, pandas, numpy, pytest, optional akshare/tushare for data backfill, existing `research/factors_v2` output conventions.
+**Tech Stack:** Python, pandas, numpy, pytest, optional akshare/tushare for data backfill and inventory (report missing data-source deps, do not fail hard), existing `research/factors_v2` output conventions.
 
 ---
 
@@ -102,8 +102,11 @@ This is the pre-registered baseline. Do not grid search windows or horizons befo
 
 ```powershell
 python -c "import pandas, numpy; print('core deps ok')"
-python -c "import akshare; print('akshare ok')"
+python -c "import importlib.util as u; print('akshare:', 'installed' if u.find_spec('akshare') else 'missing (optional)')"
+python -c "import importlib.util as u; print('tushare:', 'installed' if u.find_spec('tushare') else 'missing (optional)')"
 ```
+
+Treat missing `akshare` / `tushare` as inventory information, not a hard failure.
 
 - [ ] Check local data files:
 
