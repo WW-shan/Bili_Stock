@@ -10,6 +10,8 @@
 
 ---
 
+Research rationale for the repository owner: `docs/cb_leadlag_alpha_research_report.md`.
+
 ## Context
 
 The current checkout does not contain enough data to run the experiment. `.gitignore` excludes `data/`, `*.csv`, `*.db`, and `research/factors_v2/cache/`, so the missing data is likely local-only rather than intentionally absent from the research design.
