@@ -63,6 +63,7 @@ This is the pre-registered baseline. Do not grid search windows or horizons befo
 - Portfolio metrics:
   - headline tradable metric: long-only top quintile versus equal-weight CB-linked stock universe, after stock round-trip cost;
   - diagnostic metric: top quintile minus bottom quintile, after cost, explicitly marked as paper-only because A-share single-stock shorting is constrained.
+- Random control: each week, draw a same-universe random portfolio with the same size as the signal top quintile. Use a fixed seed and at least `n_random_repeats=1`. True alpha is `signal excess - random excess`.
 - Quintile rule: drop weeks with universe size < 25; use equal-weight groups, deterministic rank tie-breaking, and `pd.qcut(..., labels=False, duplicates="drop")`.
 - Cost assumption: start with 56 bp round-trip; report sensitivity at 20 bp and 100 bp.
 - In-sample window: `2022-01-01` to `2025-06-30`.
@@ -74,9 +75,13 @@ This is the pre-registered baseline. Do not grid search windows or horizons befo
   - In-sample mean rank IC >= 0.03.
   - In-sample IC t-stat >= 2.5.
   - In-sample after-cost long-only excess return > 0.
+  - In-sample same-universe random-control mean IC < 0.005.
+  - In-sample signal IC minus random-control IC > 2 x standard error.
+  - In-sample after-cost signal excess > random-control excess.
   - Holdout IC keeps the same sign and is >= 0.015.
   - Holdout IC t-stat >= 1.5.
   - Holdout after-cost long-only excess return > 0.
+  - Holdout after-cost signal excess > random-control excess.
 
 - Strict fail if any of:
   - Current-survivor sample only.
@@ -84,6 +89,8 @@ This is the pre-registered baseline. Do not grid search windows or horizons befo
   - Forced-redemption events cannot be filtered.
   - Point-in-time conversion-price history is missing.
   - Raw and adjusted stock close are not distinguishable.
+  - Same-universe random control is not run.
+  - Random-control IC is comparable to the signal IC.
   - In-sample IC is below 0.02 or flips sign by year.
   - After-cost long-only excess return is negative.
 
@@ -142,6 +149,7 @@ Get-ChildItem data/cb/daily -Filter *.csv | Measure-Object
   - stock forward return uses adjusted close,
   - rank IC returns positive value on a tiny known sample,
   - long-only excess return and top-minus-bottom spread apply costs,
+  - random control uses the same weekly universe and the same portfolio size,
   - weekly holding intervals do not double-count capital.
 
 - [ ] Run and confirm tests fail before implementation:
@@ -159,6 +167,7 @@ pytest tests/research/test_cb_leadlag_mvp.py -q
   - `compute_forward_returns(panel)`,
   - `rank_ic_by_date(panel)`,
   - `long_only_excess(panel, cost_bps)`,
+  - `random_control(panel, cost_bps, seed)`,
   - `quintile_spread(panel, cost_bps)`.
 
 - [ ] Re-run tests until they pass.
@@ -222,9 +231,13 @@ The script must refuse to overwrite an existing holdout result unless a reviewer
 | IS mean rank IC | >= 0.03 |  |  |
 | IS IC t-stat | >= 2.5 |  |  |
 | IS long-only excess after cost | > 0 |  |  |
+| IS random-control mean IC | < 0.005 |  |  |
+| IS signal IC minus random IC | > 2 x SE |  |  |
+| IS signal excess minus random excess | > 0 |  |  |
 | OOS mean rank IC | >= 0.015 |  |  |
 | OOS IC t-stat | >= 1.5 |  |  |
 | OOS long-only excess after cost | > 0 |  |  |
+| OOS signal excess minus random excess | > 0 |  |  |
 
 - [ ] Include per-year IC:
 
@@ -239,9 +252,10 @@ The script must refuse to overwrite an existing holdout result unless a reviewer
   - whether sample includes redeemed/delisted CBs.
   - number of rows dropped due to missing amount in strict mode.
   - top/bottom quintile industry exposure as a diagnostic.
+  - random-control IC and random-control excess return.
 
 - [ ] Include pre-registration notes:
-  - state that 10/30/60-day windows, CB-return residuals, monthly horizon, and volatility divergence were not tested in this PR;
+  - state that 10/30/60-day windows, CB-return residuals, monthly horizon, reverse stock-to-CB lead-lag, and volatility divergence were not tested in this PR;
   - future variants must use only data after the current holdout end date or be opened as a separately pre-registered experiment.
 
 - [ ] End with one of three labels only:
@@ -256,6 +270,11 @@ The script must refuse to overwrite an existing holdout result unless a reviewer
 - [ ] Include `data_inventory.md` so reviewers know whether this was strict or smoke-test.
 - [ ] Include the exact command output for tests.
 - [ ] Include a short PR summary with the final label and the reason.
+
+## Out Of Scope / Next Iteration
+
+- If CB -> stock lead-lag is `REJECTED`, the next pre-registered experiment should test reverse stock -> CB lead-lag using the same `t+1` to `t+6` horizon discipline.
+- Do not run the reverse direction inside this PR. It is a separate hypothesis and needs its own freeze manifest.
 
 ## Do Not Do
 

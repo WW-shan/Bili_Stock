@@ -50,6 +50,7 @@
 - 正股收益：用复权收盘价计算 `t+1` 到 `t+6`；
 - 事件过滤：headline 指标只能过滤 `t` 时已经知道的强赎事件，不能用未来事件；
 - 指标：周度横截面 rank IC、long-only top quintile 相对同宇宙等权收益、纸面 top-bottom spread；
+- 随机对照：每周在同一个 CB-linked universe 内随机抽取同等规模组合，最终看 `signal excess - random excess`；
 - 成本：默认 56 bp round-trip，并做 20 bp / 100 bp 敏感性；
 - 样本外：2025-07-01 之后只允许在参数冻结后运行一次。
 
@@ -60,6 +61,9 @@
 - 样本内 mean rank IC >= 0.03；
 - 样本内 IC t-stat >= 2.5；
 - 样本内成本后 long-only excess return > 0；
+- 样本内 random-control mean IC < 0.005；
+- 样本内 signal IC - random IC > 2 倍标准误；
+- 样本内 signal excess - random excess > 0；
 - 样本外 IC 同号且 >= 0.015；
 - 样本外 IC t-stat >= 1.5；
 - 样本外成本后 long-only excess return > 0。
@@ -87,6 +91,8 @@
 6. 报告最后只给三种结论之一：`VALIDATED_FOR_NEXT_STAGE`、`REJECTED`、`INSUFFICIENT_EVIDENCE`。
 
 如果严格实验失败，建议直接记录否决，不要在同一批数据上继续尝试 10D、30D、CB-return residual、波动率偏离等变体。那些可以作为下一轮预注册实验，但不能在本轮失败后临时切换。
+
+如果 CB → 正股方向被否决，下一轮可以单独预注册反向的“正股 → 可转债 lead-lag”实验。这个假设也合理，因为部分正股流动性远高于转债，信息可能先进入正股再传导到转债。但它不能和本轮实验混跑，否则会形成事后择优。
 
 ## 为什么这份 PR 有价值
 
