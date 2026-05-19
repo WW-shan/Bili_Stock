@@ -98,7 +98,7 @@ This is the pre-registered baseline. Do not grid search windows or horizons befo
 **Files:**
 - Create: `research/factors_v2/output/cb_leadlag/data_inventory.md`
 
-- [ ] Run dependency check:
+- [ ] Run dependency check with optional data-source reporting:
 
 ```powershell
 python -c "import pandas, numpy; print('core deps ok')"
@@ -218,7 +218,7 @@ The script must refuse to overwrite an existing holdout result unless a reviewer
 - [ ] Include this exact decision table:
 
 | Check | Threshold | Result | Pass |
-|---|---:|---:|---|
+| --- | ---: | ---: | --- |
 | IS mean rank IC | >= 0.03 |  |  |
 | IS IC t-stat | >= 2.5 |  |  |
 | IS long-only excess after cost | > 0 |  |  |
@@ -229,7 +229,7 @@ The script must refuse to overwrite an existing holdout result unless a reviewer
 - [ ] Include per-year IC:
 
 | Year | Mean IC | Weeks | Sign Flip | Long-Only Excess After Cost |
-|---:|---:|---:|---|---:|
+| ---: | ---: | ---: | --- | ---: |
 
 - [ ] Include data-quality notes:
   - percent of observations excluded by forced-redemption filter,
